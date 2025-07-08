@@ -115,7 +115,7 @@ class DbusLogger:
             # Battery current
             self.current_item = VeDbusItemImport(
                 bus=self.dbusConn,
-                serviceName="com.victronenergy.battery.ttyUSB0",
+                serviceName="com.victronenergy.battery.ttyUSB1",
                 path="/Dc/0/Current",
                 eventCallback=self._on_value_changed('current'),
                 createsignal=True
