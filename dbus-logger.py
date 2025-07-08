@@ -148,11 +148,38 @@ class DbusLogger:
                 createsignal=True
             )
             
+            # Read initial values for all sensors
+            self._read_initial_values()
+            
         except Exception as e:
             self.logger.error(f"Error setting up D-Bus items: {e}")
-            # Continue with None values - they'll be handled in get_sensor_data
     
-    # Event callback methods - optimized for minimal processing
+    def _read_initial_values(self):
+        """Read initial values from all D-Bus items"""
+        current_time = time.time()
+        dbus_items = [
+            ('soc', self.soc_item),
+            ('voltage', self.voltage_item),
+            ('current', self.current_item),
+            ('gps_lat', self.gps_lat_item),
+            ('gps_lon', self.gps_lon_item),
+            ('gps_speed', self.gps_speed_item)
+        ]
+        
+        for sensor_key, dbus_item in dbus_items:
+            try:
+                if dbus_item is not None:
+                    initial_value = dbus_item.get_value()
+                    if initial_value is not None:
+                        with self.data_lock:
+                            self.sensor_data[sensor_key] = {'value': initial_value, 'timestamp': current_time}
+                            self.data_changed = True
+                        self.logger.debug(f"Read initial value for {sensor_key}: {initial_value}")
+                    else:
+                        self.logger.debug(f"No initial value available for {sensor_key}")
+            except Exception as e:
+                self.logger.warning(f"Could not read initial value for {sensor_key}: {e}")
+
     def _on_value_changed(self, sensor_key):
         """Generic callback factory for sensor value changes"""
         def callback(serviceName, objectPath, changes):
@@ -249,7 +276,7 @@ class DbusLogger:
             
             # Clear buffer after successful write
             self.data_buffer.clear()
-            self.logger.info(f"Logged {buffer_size} entries to {filename}")
+            self.logger.debug(f"Logged {buffer_size} entries to {filename}")
             
         except Exception as e:
             self.logger.error(f"Error writing to log file: {e}")
