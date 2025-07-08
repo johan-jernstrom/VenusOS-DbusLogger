@@ -22,7 +22,7 @@ except ImportError:
     import gobject as GLib
     from dbus.mainloop.glib import DBusGMainLoop
 
-LOG_FILE_PREFIX = 'sensor_log_'
+LOG_FILE_PREFIX = 'dbus_log_'
 
 class DbusLogger:
     def __init__(self, log_dir="/data/VenusOS-DbusLogger/logs", buffer_size=60, min_log_interval=1.0, max_log_interval=60.0):
@@ -320,7 +320,7 @@ if __name__ == "__main__":
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
     
-    logging.basicConfig(level=logging.DEBUG, format="%(asctime)-15s %(name)-8s %(levelname)s: %(message)s")
+    logging.basicConfig(level=logging.INFO, format="%(asctime)-15s %(name)-8s %(levelname)s: %(message)s")
 
     dbusLogger = DbusLogger(
         buffer_size=10,  # Maximum number of entries to buffer before writing to disk
