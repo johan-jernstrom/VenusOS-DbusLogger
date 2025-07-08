@@ -25,10 +25,11 @@ except ImportError:
 LOG_FILE_PREFIX = 'sensor_log_'
 
 class DbusLogger:
-    def __init__(self, log_dir="/data/VenusOS-DbusLogger/logs", buffer_size=60, log_interval=1.0):
+    def __init__(self, log_dir="/data/VenusOS-DbusLogger/logs", buffer_size=60, min_log_interval=1.0, max_log_interval=60.0):
         self.log_dir = log_dir
         self.buffer_size = buffer_size
-        self.log_interval = log_interval
+        self.min_log_interval = min_log_interval  # Minimum interval to log data, to prevent flooding
+        self.max_log_interval = max_log_interval  # Maximum interval to log data, to prevent no logging at all
         self.data_buffer = deque(maxlen=buffer_size * 2)  # Double buffer for safety
         self.running = True
         
@@ -98,7 +99,7 @@ class DbusLogger:
                 bus=self.dbusConn,
                 serviceName="com.victronenergy.battery.ttyUSB1",
                 path="/Soc",
-                eventCallback=self._on_soc_changed,
+                eventCallback=self._on_value_changed('soc'),
                 createsignal=True
             )
             
@@ -107,16 +108,16 @@ class DbusLogger:
                 bus=self.dbusConn,
                 serviceName="com.victronenergy.battery.ttyUSB1",
                 path="/Dc/0/Voltage",
-                eventCallback=self._on_voltage_changed,
+                eventCallback=self._on_value_changed('voltage'),
                 createsignal=True
             )
             
             # Battery current
             self.current_item = VeDbusItemImport(
                 bus=self.dbusConn,
-                serviceName="com.victronenergy.battery.ttyUSB1",
+                serviceName="com.victronenergy.battery.ttyUSB0",
                 path="/Dc/0/Current",
-                eventCallback=self._on_current_changed,
+                eventCallback=self._on_value_changed('current'),
                 createsignal=True
             )
             
@@ -125,7 +126,7 @@ class DbusLogger:
                 bus=self.dbusConn,
                 serviceName="com.victronenergy.gps.ve_ttyACM0",
                 path="/Position/Latitude",
-                eventCallback=self._on_gps_lat_changed,
+                eventCallback=self._on_value_changed('gps_lat'),
                 createsignal=True
             )
             
@@ -134,7 +135,7 @@ class DbusLogger:
                 bus=self.dbusConn,
                 serviceName="com.victronenergy.gps.ve_ttyACM0",
                 path="/Position/Longitude",
-                eventCallback=self._on_gps_lon_changed,
+                eventCallback=self._on_value_changed('gps_lon'),
                 createsignal=True
             )
             
@@ -143,7 +144,7 @@ class DbusLogger:
                 bus=self.dbusConn,
                 serviceName="com.victronenergy.gps.ve_ttyACM0",
                 path="/Speed",
-                eventCallback=self._on_gps_speed_changed,
+                eventCallback=self._on_value_changed('gps_speed'),
                 createsignal=True
             )
             
@@ -152,59 +153,17 @@ class DbusLogger:
             # Continue with None values - they'll be handled in get_sensor_data
     
     # Event callback methods - optimized for minimal processing
-    def _on_soc_changed(self, serviceName, objectPath, changes):
-        """Callback for SOC changes"""
-        value = changes.get('Value')
-        if value is not None:
-            current_time = time.time()
-            with self.data_lock:
-                self.sensor_data['soc'] = {'value': value, 'timestamp': current_time}
-                self.data_changed = True
-    
-    def _on_voltage_changed(self, serviceName, objectPath, changes):
-        """Callback for voltage changes"""
-        value = changes.get('Value')
-        if value is not None:
-            current_time = time.time()
-            with self.data_lock:
-                self.sensor_data['voltage'] = {'value': value, 'timestamp': current_time}
-                self.data_changed = True
-    
-    def _on_current_changed(self, serviceName, objectPath, changes):
-        """Callback for current changes"""
-        value = changes.get('Value')
-        if value is not None:
-            current_time = time.time()
-            with self.data_lock:
-                self.sensor_data['current'] = {'value': value, 'timestamp': current_time}
-                self.data_changed = True
-    
-    def _on_gps_lat_changed(self, serviceName, objectPath, changes):
-        """Callback for GPS latitude changes"""
-        value = changes.get('Value')
-        if value is not None:
-            current_time = time.time()
-            with self.data_lock:
-                self.sensor_data['gps_lat'] = {'value': value, 'timestamp': current_time}
-                self.data_changed = True
-    
-    def _on_gps_lon_changed(self, serviceName, objectPath, changes):
-        """Callback for GPS longitude changes"""
-        value = changes.get('Value')
-        if value is not None:
-            current_time = time.time()
-            with self.data_lock:
-                self.sensor_data['gps_lon'] = {'value': value, 'timestamp': current_time}
-                self.data_changed = True
-    
-    def _on_gps_speed_changed(self, serviceName, objectPath, changes):
-        """Callback for GPS speed changes"""
-        value = changes.get('Value')
-        if value is not None:
-            current_time = time.time()
-            with self.data_lock:
-                self.sensor_data['gps_speed'] = {'value': value, 'timestamp': current_time}
-                self.data_changed = True
+    def _on_value_changed(self, sensor_key):
+        """Generic callback factory for sensor value changes"""
+        def callback(serviceName, objectPath, changes):
+            logging.debug(f"Value changed for {sensor_key}: {changes}")
+            value = changes.get('Value')
+            if value is not None:
+                current_time = time.time()
+                with self.data_lock:
+                    self.sensor_data[sensor_key] = {'value': value, 'timestamp': current_time}
+                    self.data_changed = True
+        return callback
     
     def get_sensor_data(self):
         """Get current sensor values from cache - optimized for speed"""
@@ -238,24 +197,24 @@ class DbusLogger:
         while self.running:
             current_time = time.time()
             
-            # Only log if data has changed or enough time has passed
-            if self.data_changed or (current_time - self.last_log_time) >= self.log_interval:
+            # Only log if data has changed or the maximum interval has passed
+            if self.data_changed or (current_time - self.last_log_time) >= self.max_log_interval:
                 log_entry = self.get_sensor_data()
                 
                 # Add to buffer
                 self.data_buffer.append(log_entry)
                 
-                # Write buffer to disk when full or every 60 seconds
+                # Write buffer to disk when full or every max_log_interval seconds
                 if (len(self.data_buffer) >= self.buffer_size or 
-                    (current_time - self.last_log_time) >= 60):
+                    (current_time - self.last_log_time) >= self.max_log_interval):
                     self._write_buffer_to_disk()
                 
                 with self.data_lock:
                     self.data_changed = False
                 self.last_log_time = current_time
             
-            # Sleep for shorter intervals to be more responsive
-            time.sleep(0.1)
+            # Sleep for the configured minimum interval to prevent flooding
+            time.sleep(self.min_log_interval)
     
     def _write_buffer_to_disk(self):
         """Write buffered data to CSV file - optimized for performance"""
@@ -334,11 +293,12 @@ if __name__ == "__main__":
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
     
-    logging.basicConfig(level=logging.INFO, format="%(asctime)-15s %(name)-8s %(levelname)s: %(message)s")
+    logging.basicConfig(level=logging.DEBUG, format="%(asctime)-15s %(name)-8s %(levelname)s: %(message)s")
 
     dbusLogger = DbusLogger(
-        buffer_size=120,  # Increased buffer size
-        log_interval=1.0  # Log every second (if data has changed)
+        buffer_size=10,  # Maximum number of entries to buffer before writing to disk
+        min_log_interval=1.0,  # Minimum interval to log data, to prevent flooding
+        max_log_interval=60.0  # Maximum interval to log data, to prevent no logging at all
     )
     
     # Have a mainloop, so we can send/receive asynchronous calls to and from dbus
