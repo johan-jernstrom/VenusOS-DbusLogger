@@ -37,33 +37,20 @@ class DbusLogger:
         self.logger = logging.getLogger(self.__class__.__name__)
         self.logger.setLevel(log_level)
         
-        # Current sensor data cache with timestamps for change detection
-        self.sensor_data = {
-            'soc': {'value': None, 'timestamp': 0},
-            'current': {'value': None, 'timestamp': 0},
-            'voltage': {'value': None, 'timestamp': 0},
-            'gps_lat': {'value': None, 'timestamp': 0},
-            'gps_lon': {'value': None, 'timestamp': 0},
-            'gps_speed': {'value': None, 'timestamp': 0}
-        }
-
-        self.sensor_cofig = {
-            'soc': {'service': 'com.victronenergy.battery.ttyUSB1', 'path': '/Soc'},
-            'voltage': {'service': 'com.victronenergy.battery.ttyUSB1', 'path': '/Dc/0/Voltage'},
-            'current': {'service': 'com.victronenergy.battery.ttyUSB1', 'path': '/Dc/0/Current'},
-            'gps_lat': {'service': 'com.victronenergy.gps.ve_ttyACM0', 'path': '/Position/Latitude'},
-            'gps_lon': {'service': 'com.victronenergy.gps.ve_ttyACM0', 'path': '/Position/Longitude'},
-            'gps_speed': {'service': 'com.victronenergy.gps.ve_ttyACM0', 'path': '/Speed'}
-        }
-
+        # All sensor configurations and their value
         self.sensors = {
-            'soc': None,
-            'voltage': None,
-            'current': None,
-            'gps_lat': None,
-            'gps_lon': None,
-            'gps_speed': None
+            'soc': {'service': 'com.victronenergy.battery.ttyUSB1', 'path': '/Soc', 'value': None},
+            'voltage': {'service': 'com.victronenergy.battery.ttyUSB1', 'path': '/Dc/0/Voltage', 'value': None},
+            'current': {'service': 'com.victronenergy.battery.ttyUSB1', 'path': '/Dc/0/Current', 'value': None},
+            'gps_lat': {'service': 'com.victronenergy.gps.ve_ttyACM0', 'path': '/Position/Latitude', 'value': None},
+            'gps_lon': {'service': 'com.victronenergy.gps.ve_ttyACM0', 'path': '/Position/Longitude', 'value': None},
+            'gps_speed': {'service': 'com.victronenergy.gps.ve_ttyACM0', 'path': '/Speed', 'value': None}
         }
+
+        # Initialize sensor dbus items with None, will be set up later
+        self.sensor_items = {}
+        for sensor_key in self.sensors.keys():
+            self.sensor_items[sensor_key] = None
         
         # Thread lock for sensor data
         self.data_lock = threading.Lock()
@@ -98,8 +85,12 @@ class DbusLogger:
         
         # Then start the logging thread
         if not self.log_thread.is_alive():
-            self.log_thread.start()
-            self.logger.info("Logging thread started")
+            try:
+                self.log_thread.start()
+                self.logger.info("Logging thread started")
+            except Exception as e:
+                self.logger.error(f"Error starting logging thread: {e}")
+                raise
 
         
     def _setup_dbus_items(self):
@@ -109,13 +100,15 @@ class DbusLogger:
             return
             
         try:
-            for sensor_key, config in self.sensor_cofig.items():
-                if sensor_key not in self.sensors:
-                    self.sensors[sensor_key] = None
+            for sensor_key, config in self.sensors.items():
+
+                # Add sensor key to sensor_items if not already present
+                if sensor_key not in self.sensor_items:
+                    self.sensor_items[sensor_key] = None
 
                 # Skip if sensor already initialized
-                if self.sensors[sensor_key] is not None:
-                    self.logger.debug(f"Sensor {sensor_key} already initialized, skipping setup")
+                if self.sensor_items[sensor_key] is not None:
+                    # self.logger.debug(f"Sensor {sensor_key} already initialized, skipping setup")
                     continue
 
                 # Initialize sensor item
@@ -124,7 +117,7 @@ class DbusLogger:
                     path = config['path']
                     
                     # Create VeDbusItemImport for each sensor
-                    self.sensors[sensor_key] = VeDbusItemImport(
+                    self.sensor_items[sensor_key] = VeDbusItemImport(
                         bus=self.dbusConn,
                         serviceName=service_name,
                         path=path,
@@ -134,28 +127,33 @@ class DbusLogger:
                     self.logger.debug(f"Initialized D-Bus item for {sensor_key} at {service_name}{path}")
 
                     # read initial value
-                    initial_value = self.sensors[sensor_key].get_value()
+                    initial_value = self.sensor_items[sensor_key].get_value()
                     if initial_value is not None:
                         current_time = time.time()
                         with self.data_lock:
-                            self.sensor_data[sensor_key] = {'value': initial_value, 'timestamp': current_time}
+                            self.sensors[sensor_key] = {'value': initial_value, 'timestamp': current_time}
                             self.data_changed = True
                         self.logger.debug(f"Read initial value for {sensor_key}: {initial_value}")
+                    else:
+                        # Initialize with None value and current timestamp
+                        current_time = time.time()
+                        with self.data_lock:
+                            self.sensors[sensor_key] = {'value': None, 'timestamp': current_time}
                 except Exception as e:
-                    self.logger.error(f"Error setting up D-Bus item for {sensor_key}: {e}")
-                    self.sensors[sensor_key] = None
+                    self.logger.debug(f"Error setting up D-Bus item for {sensor_key}: {e}")
+                    self.sensor_items[sensor_key] = None
         except Exception as e:
             self.logger.error(f"Error setting up all D-Bus items: {e}")
 
     def _on_value_changed(self, sensor_key):
         """Generic callback factory for sensor value changes"""
         def callback(serviceName, objectPath, changes):
-            logging.debug(f"Value changed for {sensor_key}: {changes}")
+            self.logger.debug(f"Value changed for {sensor_key}: {changes}")
             value = changes.get('Value')
             if value is not None:
                 current_time = time.time()
                 with self.data_lock:
-                    self.sensor_data[sensor_key] = {'value': value, 'timestamp': current_time}
+                    self.sensors[sensor_key] = {'value': value, 'timestamp': current_time}
                     self.data_changed = True
         return callback
     
@@ -163,22 +161,33 @@ class DbusLogger:
         """Get current sensor values from cache"""
         with self.data_lock:
             # Use dictionary comprehension for better performance
-            data = {
-                'timestamp': datetime.now().isoformat(),
-                'soc': float(self.sensor_data['soc']['value']) if self.sensor_data['soc']['value'] is not None else None,
-                'current': float(self.sensor_data['current']['value']) if self.sensor_data['current']['value'] is not None else None,
-                'voltage': float(self.sensor_data['voltage']['value']) if self.sensor_data['voltage']['value'] is not None else None,
-                'gps_lat': float(self.sensor_data['gps_lat']['value']) if self.sensor_data['gps_lat']['value'] is not None else None,
-                'gps_lon': float(self.sensor_data['gps_lon']['value']) if self.sensor_data['gps_lon']['value'] is not None else None,
-                'gps_speed': float(self.sensor_data['gps_speed']['value']) if self.sensor_data['gps_speed']['value'] is not None else None
-            }
+            data = {}
+            for key in self.sensors:
+                try:
+                    data[key] = self.sensors[key]['value']
+                except (KeyError, TypeError):
+                    data[key] = float('nan')
+            
+            # Add timestamp for current time
+            data['timestamp'] = datetime.now().isoformat()
+            
+            # Convert None values to float('nan') for consistency
+            for key in data:
+                if data[key] is None:
+                    data[key] = float('nan')
+            
+            # Ensure all keys are present in the data
+            for key in self.sensors:
+                if key not in data:
+                    data[key] = float('nan')
         return data
     
     def _log_worker(self):
         """Worker thread that logs data """
         while self.running:
             current_time = time.time()
-            
+            self._setup_dbus_items()  # Ensure D-Bus items are set up and any not yet initialized sensors are handled
+
             # Only log if data has changed or the maximum interval has passed
             if self.data_changed or (current_time - self.last_log_time) >= self.max_log_interval:
                 log_entry = self.get_sensor_data()
@@ -186,6 +195,8 @@ class DbusLogger:
                 # Add to buffer
                 self.data_buffer.append(log_entry)
                 
+                self.logger.debug(f"Buffered data: {log_entry}")
+
                 # Write buffer to disk when full or every max_log_interval seconds
                 if (len(self.data_buffer) >= self.buffer_size or 
                     (current_time - self.last_log_time) >= self.max_log_interval):
@@ -201,6 +212,7 @@ class DbusLogger:
     def _write_buffer_to_disk(self):
         """Write buffered data to CSV file"""
         if not self.data_buffer:
+            self.logger.debug("Data buffer is empty, nothing to write")
             return
         
         buffer_size = len(self.data_buffer)
@@ -215,10 +227,10 @@ class DbusLogger:
         try:
             # Use larger buffer size for file I/O
             with open(filepath, 'a', newline='', buffering=8192) as csvfile:
-                fieldnames = ['timestamp', 'soc', 'current', 'voltage', 
-                            'gps_lat', 'gps_lon', 'gps_speed']
+
+                # Prepare CSV writer
+                fieldnames = ['timestamp'] + list(self.sensors.keys())                
                 writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-                
                 if not file_exists:
                     writer.writeheader()
                 
