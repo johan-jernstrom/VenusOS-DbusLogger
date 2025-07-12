@@ -1,7 +1,14 @@
 #!/usr/bin/env python3
+"""
+Venus OS D-Bus Logger
+This script is designed to run on Venus OS systems, such as those used in Victron Energy products.
+This service periodically logs D-Bus values from Venus OS system to CSV files.
+It uses the built-in DbusMonitor class for automatic service discovery and robust monitoring.
+
+"""
+
 import os
 import sys
-import dbus
 import csv
 import logging
 import time
@@ -10,9 +17,24 @@ import threading
 from datetime import datetime
 from collections import deque
 
-# Import victron package for updating dbus (using lib from built in service)
-sys.path.insert(1, os.path.join(os.path.dirname(__file__), '/opt/victronenergy/dbus-modem'))
-from vedbus import VeDbusItemImport
+# Import victron packages
+sys.path.insert(1, os.path.join(os.path.dirname(__file__), '/opt/victronenergy/dbus-systemcalc-py/ext/velib_python'))
+try:
+    from dbusmonitor import DbusMonitor
+except ImportError:
+    # Fallback paths for different Venus OS versions
+    for path in ['/opt/victronenergy/dbus-systemcalc-py/ext/velib_python',
+                 '/opt/victronenergy/velib_python',
+                 '/usr/lib/python3/dist-packages']:
+        if path not in sys.path:
+            sys.path.insert(1, path)
+        try:
+            from dbusmonitor import DbusMonitor
+            break
+        except ImportError:
+            continue
+    else:
+        raise ImportError("Could not import DbusMonitor. Please check velib_python installation.")
 
 # Import GLib for mainloop
 try:
@@ -37,20 +59,23 @@ class DbusLogger:
         self.logger = logging.getLogger(self.__class__.__name__)
         self.logger.setLevel(log_level)
         
-        # All sensor configurations and their value
-        self.sensors = {
-            'soc': {'service': 'com.victronenergy.battery.ttyUSB1', 'path': '/Soc', 'value': None},
-            'voltage': {'service': 'com.victronenergy.battery.ttyUSB1', 'path': '/Dc/0/Voltage', 'value': None},
-            'current': {'service': 'com.victronenergy.battery.ttyUSB1', 'path': '/Dc/0/Current', 'value': None},
-            'gps_lat': {'service': 'com.victronenergy.gps.ve_ttyACM0', 'path': '/Position/Latitude', 'value': None},
-            'gps_lon': {'service': 'com.victronenergy.gps.ve_ttyACM0', 'path': '/Position/Longitude', 'value': None},
-            'gps_speed': {'service': 'com.victronenergy.gps.ve_ttyACM0', 'path': '/Speed', 'value': None}
+        # Define what services and paths to monitor using DbusMonitor format
+        # The structure is: {'service_class': {'/path': {'code': None, 'whenToLog': 'always'}}}
+        self.monitor_list = {
+            'com.victronenergy.battery.ttyUSB1': {
+                '/Soc': {'code': 'soc', 'whenToLog': 'always'},
+                '/Dc/0/Voltage': {'code': 'voltage', 'whenToLog': 'always'},
+                '/Dc/0/Current': {'code': 'current', 'whenToLog': 'always'}
+            },
+            'com.victronenergy.gps': {
+                '/Position/Latitude': {'code': 'gps_lat', 'whenToLog': 'always'},
+                '/Position/Longitude': {'code': 'gps_lon', 'whenToLog': 'always'},
+                '/Speed': {'code': 'gps_speed', 'whenToLog': 'always'}
+            }
         }
-
-        # Initialize sensor dbus items with None, will be set up later
-        self.sensor_items = {}
-        for sensor_key in self.sensors.keys():
-            self.sensor_items[sensor_key] = None
+        
+        # Cache for sensor data
+        self.sensor_data = {}
         
         # Thread lock for sensor data
         self.data_lock = threading.Lock()
@@ -62,28 +87,34 @@ class DbusLogger:
         # Ensure log directory exists
         os.makedirs(log_dir, exist_ok=True)
         
-        # D-Bus connection and items will be initialized later after main loop setup
-        self.dbusConn = None
+        # D-Bus monitor will be initialized later
+        self.dbusMonitor = None
         
         # Init logging thread
         self.log_thread = threading.Thread(target=self._log_worker)
         self.log_thread.daemon = True
-        # self.log_thread.start() # don't start immediately, let the user call start_logging() to control it
 
     def start_logging(self):
-        """Initialize D-Bus connection and start the logging thread"""
+        """Initialize D-Bus monitor and start the logging thread"""
         try:
-            # Connect to the sessionbus. Note that on ccgx we use systembus instead.
-            self.dbusConn = dbus.SessionBus() if 'DBUS_SESSION_BUS_ADDRESS' in os.environ else dbus.SystemBus()
+            # Initialize DbusMonitor with our monitor list and callbacks
+            self.dbusMonitor = DbusMonitor(
+                dbusTree=self.monitor_list,
+                valueChangedCallback=self._on_value_changed,
+                deviceAddedCallback=self._on_device_added,
+                deviceRemovedCallback=self._on_device_removed
+            )
             
-            # Initialize D-Bus item imports
-            self._setup_dbus_items()
-            self.logger.info("D-Bus connection and items initialized successfully")
+            self.logger.info("DbusMonitor initialized successfully for services: " + ', '.join(self.monitor_list.keys()))
+            
+            # Initialize sensor data cache with current values
+            self._initialize_sensor_cache()
             
         except Exception as e:
-            self.logger.error(f"Error initializing D-Bus: {e}")
+            self.logger.error(f"Error initializing DbusMonitor: {e}")
+            raise
         
-        # Then start the logging thread
+        # Start the logging thread
         if not self.log_thread.is_alive():
             try:
                 self.log_thread.start()
@@ -92,101 +123,115 @@ class DbusLogger:
                 self.logger.error(f"Error starting logging thread: {e}")
                 raise
 
-        
-    def _setup_dbus_items(self):
-        """Set up VeDbusItemImport objects for all sensors with event callbacks"""
-        if not self.dbusConn:
-            self.logger.error("D-Bus connection not established")
+    def _initialize_sensor_cache(self):
+        """Initialize sensor data cache with current values from DbusMonitor"""
+        if not self.dbusMonitor:
             return
             
-        try:
-            for sensor_key, config in self.sensors.items():
-
-                # Add sensor key to sensor_items if not already present
-                if sensor_key not in self.sensor_items:
-                    self.sensor_items[sensor_key] = None
-
-                # Skip if sensor already initialized
-                if self.sensor_items[sensor_key] is not None:
-                    # self.logger.debug(f"Sensor {sensor_key} already initialized, skipping setup")
-                    continue
-
-                # Initialize sensor item
-                try:
-                    service_name = config['service']
-                    path = config['path']
+        with self.data_lock:
+            current_time = time.time()
+            
+            # Initialize all expected sensor keys
+            for service_class, paths in self.monitor_list.items():
+                for path, config in paths.items():
+                    sensor_key = config['code']
                     
-                    # Create VeDbusItemImport for each sensor
-                    self.sensor_items[sensor_key] = VeDbusItemImport(
-                        bus=self.dbusConn,
-                        serviceName=service_name,
-                        path=path,
-                        eventCallback=self._on_value_changed(sensor_key),
-                        createsignal=True
-                    )
-                    self.logger.debug(f"Initialized D-Bus item for {sensor_key} at {service_name}{path}")
+                    # Try to get current value from any matching service
+                    value = None
+                    for service_name in self.dbusMonitor.get_service_list(service_class):
+                        value = self.dbusMonitor.get_value(service_name, path)
+                        if value is not None:
+                            break
+                    
+                    self.sensor_data[sensor_key] = {
+                        'value': value,
+                        'timestamp': current_time
+                    }
+            
+            self.data_changed = True
+            self.logger.debug(f"Initialized sensor cache with {len(self.sensor_data)} sensors: {list(self.sensor_data.keys())}")
 
-                    # read initial value
-                    initial_value = self.sensor_items[sensor_key].get_value()
-                    if initial_value is not None:
-                        current_time = time.time()
-                        with self.data_lock:
-                            self.sensors[sensor_key] = {'value': initial_value, 'timestamp': current_time}
-                            self.data_changed = True
-                        self.logger.debug(f"Read initial value for {sensor_key}: {initial_value}")
-                    else:
-                        # Initialize with None value and current timestamp
-                        current_time = time.time()
-                        with self.data_lock:
-                            self.sensors[sensor_key] = {'value': None, 'timestamp': current_time}
-                except Exception as e:
-                    self.logger.debug(f"Error setting up D-Bus item for {sensor_key}: {e}")
-                    self.sensor_items[sensor_key] = None
-        except Exception as e:
-            self.logger.error(f"Error setting up all D-Bus items: {e}")
 
-    def _on_value_changed(self, sensor_key):
-        """Generic callback factory for sensor value changes"""
-        def callback(serviceName, objectPath, changes):
-            self.logger.debug(f"Value changed for {sensor_key}: {changes}")
-            value = changes.get('Value')
-            if value is not None:
-                current_time = time.time()
-                with self.data_lock:
-                    self.sensors[sensor_key] = {'value': value, 'timestamp': current_time}
+    def _on_device_added(self, service_name, device_instance):
+        """Callback when a new device is added to the bus"""
+        self.logger.info(f"Device added: {service_name} (instance: {device_instance})")
+        # Update our cache with values from the new device
+        self._update_cache_from_service(service_name)
+
+    def _on_device_removed(self, service_name, device_instance):
+        """Callback when a device is removed from the bus"""
+        self.logger.info(f"Device removed: {service_name} (instance: {device_instance})")
+
+    def _update_cache_from_service(self, service_name):
+        """Update cache with values from a specific service"""
+        if not self.dbusMonitor:
+            return
+            
+        service_class = '.'.join(service_name.split('.')[0:3])
+        paths = self.monitor_list.get(service_class, {})
+        
+        with self.data_lock:
+            current_time = time.time()
+            for path, config in paths.items():
+                sensor_key = config['code']
+                value = self.dbusMonitor.get_value(service_name, path)
+                
+                if value is not None:
+                    self.sensor_data[sensor_key] = {
+                        'value': value,
+                        'timestamp': current_time
+                    }
                     self.data_changed = True
-        return callback
+
+    def _on_value_changed(self, service_name, path, options, changes, device_instance):
+        """Callback when a monitored value changes"""
+        if 'Value' not in changes:
+            return
+            
+        sensor_key = options.get('code')
+        if not sensor_key:
+            return
+            
+        value = changes['Value']
+        current_time = time.time()
+        
+        with self.data_lock:
+            self.sensor_data[sensor_key] = {
+                'value': value,
+                'timestamp': current_time
+            }
+            self.data_changed = True
+            
+        self.logger.debug(f"Value changed for {sensor_key}: {value}")
     
     def get_sensor_data(self):
         """Get current sensor values from cache"""
         with self.data_lock:
-            # Use dictionary comprehension for better performance
+            # Create data dictionary with current values
             data = {}
-            for key in self.sensors:
-                try:
-                    data[key] = self.sensors[key]['value']
-                except (KeyError, TypeError):
-                    data[key] = float('nan')
+            for sensor_key, sensor_info in self.sensor_data.items():
+                value = sensor_info.get('value')
+                data[sensor_key] = value if value is not None else float('nan')
             
-            # Add timestamp for current time
+            # Add timestamp for current reading
             data['timestamp'] = datetime.now().isoformat()
             
-            # Convert None values to float('nan') for consistency
-            for key in data:
-                if data[key] is None:
-                    data[key] = float('nan')
+            # Ensure all expected sensors are present
+            expected_sensors = set()
+            for service_class, paths in self.monitor_list.items():
+                for path, config in paths.items():
+                    expected_sensors.add(config['code'])
             
-            # Ensure all keys are present in the data
-            for key in self.sensors:
-                if key not in data:
-                    data[key] = float('nan')
+            for sensor_key in expected_sensors:
+                if sensor_key not in data:
+                    data[sensor_key] = float('nan')
+                    
         return data
     
     def _log_worker(self):
         """Worker thread that logs data """
         while self.running:
             current_time = time.time()
-            self._setup_dbus_items()  # Ensure D-Bus items are set up and any not yet initialized sensors are handled
 
             # Only log if data has changed or the maximum interval has passed
             if self.data_changed or (current_time - self.last_log_time) >= self.max_log_interval:
@@ -227,9 +272,12 @@ class DbusLogger:
         try:
             # Use larger buffer size for file I/O
             with open(filepath, 'a', newline='', buffering=8192) as csvfile:
-
-                # Prepare CSV writer
-                fieldnames = ['timestamp'] + list(self.sensors.keys())                
+                # Determine fieldnames from monitor list
+                fieldnames = ['timestamp']
+                for service_class, paths in self.monitor_list.items():
+                    for path, config in paths.items():
+                        fieldnames.append(config['code'])
+                
                 writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
                 if not file_exists:
                     writer.writeheader()
