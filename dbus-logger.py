@@ -18,7 +18,6 @@ from datetime import datetime
 from collections import deque
 
 # Import victron packages
-sys.path.insert(1, os.path.join(os.path.dirname(__file__), '/opt/victronenergy/dbus-systemcalc-py/ext/velib_python'))
 try:
     from dbusmonitor import DbusMonitor
 except ImportError:
@@ -41,8 +40,13 @@ try:
     from gi.repository import GLib
     from dbus.mainloop.glib import DBusGMainLoop
 except ImportError:
-    import gobject as GLib
-    from dbus.mainloop.glib import DBusGMainLoop
+    try:
+        import gobject as GLib
+        from dbus.mainloop.glib import DBusGMainLoop
+    except ImportError:
+        # Fallback for older systems
+        import gobject as GLib
+        from dbus.mainloop.glib import DBusGMainLoop as DBusGMainLoop
 
 LOG_FILE_PREFIX = 'dbus_log_'
 
@@ -117,6 +121,11 @@ class DbusLogger:
         # Start the logging thread
         if not self.log_thread.is_alive():
             try:
+                # Create new thread if the old one has stopped
+                if not self.log_thread.is_alive() and self.log_thread.ident is not None:
+                    self.log_thread = threading.Thread(target=self._log_worker)
+                    self.log_thread.daemon = True
+                    
                 self.log_thread.start()
                 self.logger.info("Logging thread started")
             except Exception as e:
@@ -154,55 +163,72 @@ class DbusLogger:
 
     def _on_device_added(self, service_name, device_instance):
         """Callback when a new device is added to the bus"""
-        self.logger.info(f"Device added: {service_name} (instance: {device_instance})")
-        # Update our cache with values from the new device
-        self._update_cache_from_service(service_name)
+        try:
+            self.logger.info(f"Device added: {service_name} (instance: {device_instance})")
+            # Update our cache with values from the new device
+            self._update_cache_from_service(service_name)
+        except Exception as e:
+            self.logger.error(f"Error in _on_device_added callback: {e}")
 
     def _on_device_removed(self, service_name, device_instance):
         """Callback when a device is removed from the bus"""
-        self.logger.info(f"Device removed: {service_name} (instance: {device_instance})")
+        try:
+            self.logger.info(f"Device removed: {service_name} (instance: {device_instance})")
+        except Exception as e:
+            self.logger.error(f"Error in _on_device_removed callback: {e}")
 
     def _update_cache_from_service(self, service_name):
         """Update cache with values from a specific service"""
         if not self.dbusMonitor:
             return
             
-        service_class = '.'.join(service_name.split('.')[0:3])
-        paths = self.monitor_list.get(service_class, {})
-        
-        with self.data_lock:
-            current_time = time.time()
-            for path, config in paths.items():
-                sensor_key = config['code']
-                value = self.dbusMonitor.get_value(service_name, path)
-                
-                if value is not None:
-                    self.sensor_data[sensor_key] = {
-                        'value': value,
-                        'timestamp': current_time
-                    }
-                    self.data_changed = True
+        try:
+            service_parts = service_name.split('.')
+            if len(service_parts) >= 3:
+                service_class = '.'.join(service_parts[0:3])
+            else:
+                service_class = service_name
+            
+            paths = self.monitor_list.get(service_class, {})
+            
+            with self.data_lock:
+                current_time = time.time()
+                for path, config in paths.items():
+                    sensor_key = config['code']
+                    value = self.dbusMonitor.get_value(service_name, path)
+                    
+                    if value is not None:
+                        self.sensor_data[sensor_key] = {
+                            'value': value,
+                            'timestamp': current_time
+                        }
+                        self.data_changed = True
+        except Exception as e:
+            self.logger.error(f"Error updating cache from service {service_name}: {e}")
 
     def _on_value_changed(self, service_name, path, options, changes, device_instance):
         """Callback when a monitored value changes"""
-        if 'Value' not in changes:
-            return
+        try:
+            if 'Value' not in changes:
+                return
+                
+            sensor_key = options.get('code')
+            if not sensor_key:
+                return
+                
+            value = changes['Value']
+            current_time = time.time()
             
-        sensor_key = options.get('code')
-        if not sensor_key:
-            return
-            
-        value = changes['Value']
-        current_time = time.time()
-        
-        with self.data_lock:
-            self.sensor_data[sensor_key] = {
-                'value': value,
-                'timestamp': current_time
-            }
-            self.data_changed = True
-            
-        self.logger.debug(f"Value changed for {sensor_key}: {value}")
+            with self.data_lock:
+                self.sensor_data[sensor_key] = {
+                    'value': value,
+                    'timestamp': current_time
+                }
+                self.data_changed = True
+                
+            self.logger.debug(f"Value changed for {sensor_key}: {value}")
+        except Exception as e:
+            self.logger.error(f"Error in _on_value_changed callback: {e}")
     
     def get_sensor_data(self):
         """Get current sensor values from cache"""
@@ -233,8 +259,11 @@ class DbusLogger:
         while self.running:
             current_time = time.time()
 
+            with self.data_lock:
+                data_changed = self.data_changed
+            
             # Only log if data has changed or the maximum interval has passed
-            if self.data_changed or (current_time - self.last_log_time) >= self.max_log_interval:
+            if data_changed or (current_time - self.last_log_time) >= self.max_log_interval:
                 log_entry = self.get_sensor_data()
                 
                 # Add to buffer
@@ -295,7 +324,10 @@ class DbusLogger:
             
         except Exception as e:
             self.logger.error(f"Error writing to log file: {e}")
-            # Don't clear buffer on error - try again next time
+            # Prevent infinite buffer growth - clear buffer if it gets too large
+            if len(self.data_buffer) > self.buffer_size * 5:  # 5x normal buffer size
+                self.logger.warning(f"Buffer overflow detected, clearing {len(self.data_buffer)} entries")
+                self.data_buffer.clear()
     
     def _cleanup_old_logs(self, days_to_keep=30):
         """Clean up old log files to save disk space"""
@@ -314,12 +346,13 @@ class DbusLogger:
         """Stop the logger and flush remaining data"""
         self.running = False
         
+        # Fix: Wait for worker thread to finish current processing
+        if self.log_thread.is_alive():
+            self.log_thread.join(timeout=5)
+        
         # Final cleanup and flush
         self._write_buffer_to_disk()
         self._cleanup_old_logs()
-        
-        if self.log_thread.is_alive():
-            self.log_thread.join(timeout=5)
 
 def signal_handler(signum, frame):
     """Handle shutdown signals gracefully"""
