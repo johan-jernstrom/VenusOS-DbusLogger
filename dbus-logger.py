@@ -25,7 +25,7 @@ except ImportError:
 LOG_FILE_PREFIX = 'dbus_log_'
 
 class DbusLogger:
-    def __init__(self, log_dir="/data/VenusOS-DbusLogger/logs", buffer_size=60, min_log_interval=1.0, max_log_interval=60.0):
+    def __init__(self, log_dir="/data/VenusOS-DbusLogger/logs", buffer_size=60, min_log_interval=1.0, max_log_interval=60.0, log_level=logging.INFO):
         self.log_dir = log_dir
         self.buffer_size = buffer_size
         self.min_log_interval = min_log_interval  # Minimum interval to log data, to prevent flooding
@@ -33,8 +33,9 @@ class DbusLogger:
         self.data_buffer = deque(maxlen=buffer_size * 2)  # Double buffer for safety
         self.running = True
         
-        # Set up logger for this instance
+        # Set up logger for this instance with specified log level
         self.logger = logging.getLogger(self.__class__.__name__)
+        self.logger.setLevel(log_level)
         
         # Current sensor data cache with timestamps for change detection
         self.sensor_data = {
@@ -44,6 +45,24 @@ class DbusLogger:
             'gps_lat': {'value': None, 'timestamp': 0},
             'gps_lon': {'value': None, 'timestamp': 0},
             'gps_speed': {'value': None, 'timestamp': 0}
+        }
+
+        self.sensor_cofig = {
+            'soc': {'service': 'com.victronenergy.battery.ttyUSB1', 'path': '/Soc'},
+            'voltage': {'service': 'com.victronenergy.battery.ttyUSB1', 'path': '/Dc/0/Voltage'},
+            'current': {'service': 'com.victronenergy.battery.ttyUSB1', 'path': '/Dc/0/Current'},
+            'gps_lat': {'service': 'com.victronenergy.gps.ve_ttyACM0', 'path': '/Position/Latitude'},
+            'gps_lon': {'service': 'com.victronenergy.gps.ve_ttyACM0', 'path': '/Position/Longitude'},
+            'gps_speed': {'service': 'com.victronenergy.gps.ve_ttyACM0', 'path': '/Speed'}
+        }
+
+        self.sensors = {
+            'soc': None,
+            'voltage': None,
+            'current': None,
+            'gps_lat': None,
+            'gps_lon': None,
+            'gps_speed': None
         }
         
         # Thread lock for sensor data
@@ -58,7 +77,6 @@ class DbusLogger:
         
         # D-Bus connection and items will be initialized later after main loop setup
         self.dbusConn = None
-        self.dbus_items_initialized = False
         
         # Init logging thread
         self.log_thread = threading.Thread(target=self._log_worker)
@@ -67,19 +85,16 @@ class DbusLogger:
 
     def start_logging(self):
         """Initialize D-Bus connection and start the logging thread"""
-        # First initialize D-Bus if not already done
-        if not self.dbus_items_initialized:
-            try:
-                # Connect to the sessionbus. Note that on ccgx we use systembus instead.
-                self.dbusConn = dbus.SessionBus() if 'DBUS_SESSION_BUS_ADDRESS' in os.environ else dbus.SystemBus()
-                
-                # Initialize D-Bus item imports
-                self._setup_dbus_items()
-                self.dbus_items_initialized = True
-                self.logger.info("D-Bus connection and items initialized successfully")
-                
-            except Exception as e:
-                self.logger.error(f"Error initializing D-Bus: {e}")
+        try:
+            # Connect to the sessionbus. Note that on ccgx we use systembus instead.
+            self.dbusConn = dbus.SessionBus() if 'DBUS_SESSION_BUS_ADDRESS' in os.environ else dbus.SystemBus()
+            
+            # Initialize D-Bus item imports
+            self._setup_dbus_items()
+            self.logger.info("D-Bus connection and items initialized successfully")
+            
+        except Exception as e:
+            self.logger.error(f"Error initializing D-Bus: {e}")
         
         # Then start the logging thread
         if not self.log_thread.is_alive():
@@ -94,91 +109,43 @@ class DbusLogger:
             return
             
         try:
-            # Battery SOC
-            self.soc_item = VeDbusItemImport(
-                bus=self.dbusConn,
-                serviceName="com.victronenergy.battery.ttyUSB1",
-                path="/Soc",
-                eventCallback=self._on_value_changed('soc'),
-                createsignal=True
-            )
-            
-            # Battery voltage
-            self.voltage_item = VeDbusItemImport(
-                bus=self.dbusConn,
-                serviceName="com.victronenergy.battery.ttyUSB1",
-                path="/Dc/0/Voltage",
-                eventCallback=self._on_value_changed('voltage'),
-                createsignal=True
-            )
-            
-            # Battery current
-            self.current_item = VeDbusItemImport(
-                bus=self.dbusConn,
-                serviceName="com.victronenergy.battery.ttyUSB1",
-                path="/Dc/0/Current",
-                eventCallback=self._on_value_changed('current'),
-                createsignal=True
-            )
-            
-            # GPS Position (latitude)
-            self.gps_lat_item = VeDbusItemImport(
-                bus=self.dbusConn,
-                serviceName="com.victronenergy.gps.ve_ttyACM0",
-                path="/Position/Latitude",
-                eventCallback=self._on_value_changed('gps_lat'),
-                createsignal=True
-            )
-            
-            # GPS Position (longitude)
-            self.gps_lon_item = VeDbusItemImport(
-                bus=self.dbusConn,
-                serviceName="com.victronenergy.gps.ve_ttyACM0",
-                path="/Position/Longitude",
-                eventCallback=self._on_value_changed('gps_lon'),
-                createsignal=True
-            )
-            
-            # GPS Speed
-            self.gps_speed_item = VeDbusItemImport(
-                bus=self.dbusConn,
-                serviceName="com.victronenergy.gps.ve_ttyACM0",
-                path="/Speed",
-                eventCallback=self._on_value_changed('gps_speed'),
-                createsignal=True
-            )
-            
-            # Read initial values for all sensors
-            self._read_initial_values()
-            
-        except Exception as e:
-            self.logger.error(f"Error setting up D-Bus items: {e}")
-    
-    def _read_initial_values(self):
-        """Read initial values from all D-Bus items"""
-        current_time = time.time()
-        dbus_items = [
-            ('soc', self.soc_item),
-            ('voltage', self.voltage_item),
-            ('current', self.current_item),
-            ('gps_lat', self.gps_lat_item),
-            ('gps_lon', self.gps_lon_item),
-            ('gps_speed', self.gps_speed_item)
-        ]
-        
-        for sensor_key, dbus_item in dbus_items:
-            try:
-                if dbus_item is not None:
-                    initial_value = dbus_item.get_value()
+            for sensor_key, config in self.sensor_cofig.items():
+                if sensor_key not in self.sensors:
+                    self.sensors[sensor_key] = None
+
+                # Skip if sensor already initialized
+                if self.sensors[sensor_key] is not None:
+                    self.logger.debug(f"Sensor {sensor_key} already initialized, skipping setup")
+                    continue
+
+                # Initialize sensor item
+                try:
+                    service_name = config['service']
+                    path = config['path']
+                    
+                    # Create VeDbusItemImport for each sensor
+                    self.sensors[sensor_key] = VeDbusItemImport(
+                        bus=self.dbusConn,
+                        serviceName=service_name,
+                        path=path,
+                        eventCallback=self._on_value_changed(sensor_key),
+                        createsignal=True
+                    )
+                    self.logger.debug(f"Initialized D-Bus item for {sensor_key} at {service_name}{path}")
+
+                    # read initial value
+                    initial_value = self.sensors[sensor_key].get_value()
                     if initial_value is not None:
+                        current_time = time.time()
                         with self.data_lock:
                             self.sensor_data[sensor_key] = {'value': initial_value, 'timestamp': current_time}
                             self.data_changed = True
                         self.logger.debug(f"Read initial value for {sensor_key}: {initial_value}")
-                    else:
-                        self.logger.debug(f"No initial value available for {sensor_key}")
-            except Exception as e:
-                self.logger.warning(f"Could not read initial value for {sensor_key}: {e}")
+                except Exception as e:
+                    self.logger.error(f"Error setting up D-Bus item for {sensor_key}: {e}")
+                    self.sensors[sensor_key] = None
+        except Exception as e:
+            self.logger.error(f"Error setting up all D-Bus items: {e}")
 
     def _on_value_changed(self, sensor_key):
         """Generic callback factory for sensor value changes"""
@@ -193,19 +160,7 @@ class DbusLogger:
         return callback
     
     def get_sensor_data(self):
-        """Get current sensor values from cache - optimized for speed"""
-        if not self.dbus_items_initialized:
-            # Return empty data if D-Bus not initialized yet
-            return {
-                'timestamp': datetime.now().isoformat(),
-                'soc': None,
-                'current': None,
-                'voltage': None,
-                'gps_lat': None,
-                'gps_lon': None,
-                'gps_speed': None
-            }
-            
+        """Get current sensor values from cache"""
         with self.data_lock:
             # Use dictionary comprehension for better performance
             data = {
@@ -220,7 +175,7 @@ class DbusLogger:
         return data
     
     def _log_worker(self):
-        """Worker thread that logs data - optimized for performance"""
+        """Worker thread that logs data """
         while self.running:
             current_time = time.time()
             
@@ -244,7 +199,7 @@ class DbusLogger:
             time.sleep(self.min_log_interval)
     
     def _write_buffer_to_disk(self):
-        """Write buffered data to CSV file - optimized for performance"""
+        """Write buffered data to CSV file"""
         if not self.data_buffer:
             return
         
@@ -316,16 +271,36 @@ def signal_handler(signum, frame):
     sys.exit(0)
 
 if __name__ == "__main__":
+    import argparse
+    
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description='D-Bus Logger for VenusOS')
+    parser.add_argument('--log-level', type=str, default='INFO', 
+                        choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'],
+                        help='Set the logging level (default: INFO)')
+    parser.add_argument('--buffer-size', type=int, default=30,
+                        help='Maximum number of entries to buffer before writing to disk (default: 30)')
+    parser.add_argument('--min-log-interval', type=float, default=1.0,
+                        help='Minimum interval to log data, to prevent flooding (default: 1.0)')
+    parser.add_argument('--max-log-interval', type=float, default=60.0,
+                        help='Maximum interval to log data, to prevent no logging at all (default: 60.0)')
+    
+    args = parser.parse_args()
+    
+    # Convert log level string to logging constant
+    log_level = getattr(logging, args.log_level.upper())
+    
     # Set up signal handlers
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
     
-    logging.basicConfig(level=logging.INFO, format="%(asctime)-15s %(name)-8s %(levelname)s: %(message)s")
+    logging.basicConfig(level=log_level, format="%(asctime)-15s %(name)-8s %(levelname)s: %(message)s")
 
     dbusLogger = DbusLogger(
-        buffer_size=10,  # Maximum number of entries to buffer before writing to disk
-        min_log_interval=1.0,  # Minimum interval to log data, to prevent flooding
-        max_log_interval=60.0  # Maximum interval to log data, to prevent no logging at all
+        buffer_size=args.buffer_size,
+        min_log_interval=args.min_log_interval,
+        max_log_interval=args.max_log_interval,
+        log_level=log_level
     )
     
     # Have a mainloop, so we can send/receive asynchronous calls to and from dbus
