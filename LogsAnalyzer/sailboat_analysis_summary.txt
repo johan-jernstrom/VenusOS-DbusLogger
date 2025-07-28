@@ -1,10 +1,10 @@
 SAILBOAT ENGINE EFFICIENCY ANALYSIS SUMMARY
 ============================================================
-Generated on: 2025-07-28 22:06:57
+Generated on: 2025-07-28 22:14:30
 
 Total valid data points: 5
-Time period: 2024-01-01 10:00:00 to 2024-01-01 10:02:00
-Total distance traveled: 0.03 nautical miles
+Time period: 2025-07-21 09:06:05.865571 to 2025-07-21 09:06:10.873585
+Total distance traveled: 0.01 nautical miles
 
 Speed Statistics (Engine Only):
   Average speed under engine: 5.40 knots
@@ -32,8 +32,10 @@ Efficiency by Speed Range:
     Data points: 2
 
 Engine Usage:
-  Total engine time: 0.0 hours
+  Total engine time: 0.0 hours (5 seconds)
   Distance under engine: 0.0 nautical miles
-  Average engine speed: 0.8 knots
+  Average engine speed: 3.7 knots
+  Data sampling rate: ~1.0 seconds per reading
+  Estimated energy consumption: 0.00 kWh
 
 ============================================================

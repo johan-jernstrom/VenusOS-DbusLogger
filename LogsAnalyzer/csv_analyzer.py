@@ -290,19 +290,36 @@ class CSVAnalyzer:
                         print(f"    Avg Power: {range_power:.0f}W ({range_power/1000:.1f}kW)")
                         print(f"    Data points: {len(range_data)}")
                 
-                # Calculate total engine hours (approximate)
+                # Calculate total engine hours (more accurate calculation)
                 if len(self.efficiency_data) > 1:
-                    time_diff = (self.efficiency_data['timestamp'].max() - 
-                               self.efficiency_data['timestamp'].min())
-                    total_hours = time_diff.total_seconds() / 3600
+                    # Sort by timestamp to ensure correct order
+                    sorted_data = self.efficiency_data.sort_values('timestamp')
+                    
+                    # Calculate time differences between consecutive readings
+                    time_diffs = []
+                    for i in range(1, len(sorted_data)):
+                        time_diff = (sorted_data.iloc[i]['timestamp'] - sorted_data.iloc[i-1]['timestamp']).total_seconds()
+                        time_diffs.append(time_diff)
+                    
+                    # Sum all time differences to get total engine time
+                    total_seconds = sum(time_diffs)
+                    total_hours = total_seconds / 3600
+                    
                     engine_distance = self.efficiency_data['distance_nm'].sum()
                     
                     print(f"\nEngine Usage:")
-                    print(f"  Total engine time: {total_hours:.1f} hours")
+                    print(f"  Total engine time: {total_hours:.1f} hours ({total_seconds:.0f} seconds)")
                     print(f"  Distance under engine: {engine_distance:.1f} nautical miles")
-                    if engine_distance > 0:
-                        avg_engine_speed = engine_distance / total_hours if total_hours > 0 else 0
+                    if total_hours > 0 and engine_distance > 0:
+                        avg_engine_speed = engine_distance / total_hours
                         print(f"  Average engine speed: {avg_engine_speed:.1f} knots")
+                    
+                    # Additional useful metrics
+                    print(f"  Data sampling rate: ~{total_seconds/len(self.efficiency_data):.1f} seconds per reading")
+                    if total_hours > 0:
+                        avg_power_consumption = self.efficiency_data['power_watts'].mean()
+                        total_energy_kwh = (avg_power_consumption * total_hours) / 1000
+                        print(f"  Estimated energy consumption: {total_energy_kwh:.2f} kWh")
             
         print("="*60)
         
@@ -358,19 +375,36 @@ class CSVAnalyzer:
                             f.write(f"    Avg Power: {range_power:.0f}W ({range_power/1000:.1f}kW)\n")
                             f.write(f"    Data points: {len(range_data)}\n")
                     
-                    # Calculate total engine hours (approximate)
+                    # Calculate total engine hours (more accurate calculation)
                     if len(self.efficiency_data) > 1:
-                        time_diff = (self.efficiency_data['timestamp'].max() - 
-                                   self.efficiency_data['timestamp'].min())
-                        total_hours = time_diff.total_seconds() / 3600
+                        # Sort by timestamp to ensure correct order
+                        sorted_data = self.efficiency_data.sort_values('timestamp')
+                        
+                        # Calculate time differences between consecutive readings
+                        time_diffs = []
+                        for i in range(1, len(sorted_data)):
+                            time_diff = (sorted_data.iloc[i]['timestamp'] - sorted_data.iloc[i-1]['timestamp']).total_seconds()
+                            time_diffs.append(time_diff)
+                        
+                        # Sum all time differences to get total engine time
+                        total_seconds = sum(time_diffs)
+                        total_hours = total_seconds / 3600
+                        
                         engine_distance = self.efficiency_data['distance_nm'].sum()
                         
                         f.write(f"\nEngine Usage:\n")
-                        f.write(f"  Total engine time: {total_hours:.1f} hours\n")
+                        f.write(f"  Total engine time: {total_hours:.1f} hours ({total_seconds:.0f} seconds)\n")
                         f.write(f"  Distance under engine: {engine_distance:.1f} nautical miles\n")
-                        if engine_distance > 0:
-                            avg_engine_speed = engine_distance / total_hours if total_hours > 0 else 0
+                        if total_hours > 0 and engine_distance > 0:
+                            avg_engine_speed = engine_distance / total_hours
                             f.write(f"  Average engine speed: {avg_engine_speed:.1f} knots\n")
+                        
+                        # Additional useful metrics
+                        f.write(f"  Data sampling rate: ~{total_seconds/len(self.efficiency_data):.1f} seconds per reading\n")
+                        if total_hours > 0:
+                            avg_power_consumption = self.efficiency_data['power_watts'].mean()
+                            total_energy_kwh = (avg_power_consumption * total_hours) / 1000
+                            f.write(f"  Estimated energy consumption: {total_energy_kwh:.2f} kWh\n")
             
             f.write("\n" + "="*60 + "\n")
         
