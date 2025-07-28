@@ -1,15 +1,25 @@
-# CSV Data Analyzer for VenusOS DbusLogger
+# Sailboat Engine Efficiency Analyzer for VenusOS DbusLogger
 
-A Python script that analyzes CSV files containing GPS and electrical data from VenusOS DbusLogger to calculate total distance traveled and engine efficiency.
+A Python script that analyzes CSV files containing GPS and electrical data from VenusOS DbusLogger to calculate sailboat engine efficiency, optimized for realistic sailboat performance parameters.
+
+## Sailboat-Specific Features
+
+- **Realistic Speed Filtering**: Removes data points with speeds over 8 knots (sailboat maximum)
+- **Engine Power Limits**: Filters out power readings over 11kW (typical sailboat engine maximum)
+- **Current Direction Handling**: 
+  - Negative current = engine consumption (kept and converted to positive values)
+  - Positive current = battery charging when docked (filtered out)
+- **Nautical Mile Measurements**: All distances reported in nautical miles
+- **Engine-Only Analysis**: Focuses on motoring efficiency, excludes sailing data
 
 ## Features
 
-- **Distance Calculation**: Calculates total distance traveled using accurate geodesic (great circle) distance formulas
-- **Engine Efficiency Analysis**: Computes watts per knot efficiency metrics
-- **Data Visualization**: Generates comprehensive plots showing efficiency trends and relationships
+- **Distance Calculation**: Calculates total distance traveled using accurate geodesic formulas
+- **Engine Efficiency Analysis**: Computes watts per knot efficiency metrics for motoring
+- **Data Visualization**: Generates sailboat-specific plots with appropriate axis limits
 - **Batch Processing**: Processes multiple CSV files from a folder automatically
-- **Data Cleaning**: Handles invalid GPS coordinates and electrical readings
-- **Summary Reports**: Generates detailed analysis reports
+- **Advanced Filtering**: Removes charging periods, speed outliers, and power anomalies
+- **Detailed Reports**: Engine-focused analysis with speed range breakdowns
 
 ## CSV Data Format
 
@@ -22,10 +32,12 @@ Where:
 - `timestamp`: Date/time stamp
 - `soc`: State of charge (%)
 - `voltage`: Electrical voltage (V)
-- `current`: Electrical current (A)
+- `current`: Electrical current (A) - **NEGATIVE for engine consumption, POSITIVE for battery charging**
 - `gps_lat`: GPS latitude (decimal degrees)
 - `gps_lon`: GPS longitude (decimal degrees)
 - `gps_speed`: GPS speed (m/s)
+
+**Important**: Current values should be negative when the engine is consuming power and positive when batteries are being charged (typically when docked).
 
 ## Installation
 
@@ -49,24 +61,25 @@ Where:
 The script generates:
 
 ### Console Output
-- Progress information during processing
-- Summary statistics including total distance and average efficiency
+- Progress information with filtering statistics
+- Summary statistics including total distance in nautical miles and average efficiency
+- Engine-specific performance metrics
 
 ### Files Generated
-- `efficiency_analysis.png`: Multi-panel visualization showing:
-  - Efficiency over time
-  - Efficiency vs speed relationship
-  - Power vs speed relationship
+- `sailboat_efficiency_analysis.png`: Multi-panel visualization showing:
+  - Engine efficiency over time
+  - Efficiency vs speed relationship (0-8 knots)
+  - Power consumption vs speed (0-11kW limit)
   - Efficiency distribution histogram
-- `analysis_summary.txt`: Detailed text report with statistics
+- `sailboat_analysis_summary.txt`: Detailed text report with sailboat-specific statistics
 
 ### Analysis Metrics
 
-- **Total Distance**: Sum of all GPS track segments in kilometers
+- **Total Distance**: Sum of all GPS track segments in nautical miles
 - **Engine Efficiency**: Power consumption per unit of speed (watts per knot)
-- **Speed Statistics**: Average and maximum speeds achieved
-- **Power Statistics**: Average and maximum power consumption
-- **Efficiency by Speed Range**: Performance analysis across different speed bands
+- **Speed Statistics**: Average and maximum speeds under engine power only
+- **Power Statistics**: Average and maximum power consumption (filtered for 11kW limit)
+- **Efficiency by Speed Range**: Performance analysis across sailboat speed bands (0-2, 2-4, 4-6, 6-8 knots)
 
 ## Data Processing
 

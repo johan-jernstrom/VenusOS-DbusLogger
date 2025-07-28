@@ -1,0 +1,39 @@
+SAILBOAT ENGINE EFFICIENCY ANALYSIS SUMMARY
+============================================================
+Generated on: 2025-07-28 22:06:57
+
+Total valid data points: 5
+Time period: 2024-01-01 10:00:00 to 2024-01-01 10:02:00
+Total distance traveled: 0.03 nautical miles
+
+Speed Statistics (Engine Only):
+  Average speed under engine: 5.40 knots
+  Maximum speed under engine: 7.97 knots
+
+Power Consumption Statistics:
+  Average power consumption: 570 watts (0.6 kW)
+  Maximum power consumption: 834 watts (0.8 kW)
+
+Engine Efficiency:
+  Average efficiency: 107.9 watts per knot
+
+Efficiency by Speed Range:
+  Slow motoring (2-4 knots):
+    Efficiency: 128.6 watts/knot
+    Avg Power: 375W (0.4kW)
+    Data points: 1
+  Medium motoring (4-6 knots):
+    Efficiency: 102.2 watts/knot
+    Avg Power: 483W (0.5kW)
+    Data points: 2
+  Fast motoring (6-8 knots):
+    Efficiency: 103.3 watts/knot
+    Avg Power: 754W (0.8kW)
+    Data points: 2
+
+Engine Usage:
+  Total engine time: 0.0 hours
+  Distance under engine: 0.0 nautical miles
+  Average engine speed: 0.8 knots
+
+============================================================
