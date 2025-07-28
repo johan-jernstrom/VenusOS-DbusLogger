@@ -17,23 +17,8 @@ import threading
 from datetime import datetime
 from collections import deque
 
-# Import victron packages
-try:
-    from dbusmonitor import DbusMonitor
-except ImportError:
-    # Fallback paths for different Venus OS versions
-    for path in ['/opt/victronenergy/dbus-systemcalc-py/ext/velib_python',
-                 '/opt/victronenergy/velib_python',
-                 '/usr/lib/python3/dist-packages']:
-        if path not in sys.path:
-            sys.path.insert(1, path)
-        try:
-            from dbusmonitor import DbusMonitor
-            break
-        except ImportError:
-            continue
-    else:
-        raise ImportError("Could not import DbusMonitor. Please check velib_python installation.")
+# Import victron packages, use locally downloaded copy of latest version of DbusMonitor that supports ignoreServices: https://github.com/victronenergy/velib_python/blob/master/dbusmonitor.py
+from velib_python.dbusmonitor import DbusMonitor
 
 # Import GLib for mainloop
 try:
@@ -52,6 +37,14 @@ LOG_FILE_PREFIX = 'dbus_log_'
 
 class DbusLogger:
     def __init__(self, log_dir="/data/VenusOS-DbusLogger/logs", buffer_size=60, min_log_interval=1.0, max_log_interval=60.0, log_level=logging.INFO):
+        # Validate intervals
+        if min_log_interval <= 0.1:
+            raise ValueError("min_log_interval must be greater than 0.1")
+        if max_log_interval <= min_log_interval:
+            raise ValueError("max_log_interval must be greater than min_log_interval")
+        if max_log_interval > 600:  # 10 minutes
+            raise ValueError("max_log_interval should not exceed 600 seconds (10 minutes)")
+        
         self.log_dir = log_dir
         self.buffer_size = buffer_size
         self.min_log_interval = min_log_interval  # Minimum interval to log data, to prevent flooding
@@ -66,7 +59,7 @@ class DbusLogger:
         # Define what services and paths to monitor using DbusMonitor format
         # The structure is: {'service_class': {'/path': {'code': None, 'whenToLog': 'always'}}}
         self.monitor_list = {
-            'com.victronenergy.battery.ttyUSB1': {
+            'com.victronenergy.battery': {
                 '/Soc': {'code': 'soc', 'whenToLog': 'always'},
                 '/Dc/0/Voltage': {'code': 'voltage', 'whenToLog': 'always'},
                 '/Dc/0/Current': {'code': 'current', 'whenToLog': 'always'}
@@ -78,6 +71,9 @@ class DbusLogger:
             }
         }
         
+        # Ignore the following service since we only want to monitor the 48v battery service connected to ttyUSB1
+        self.ignored_services = ['com.victronenergy.battery.ttyUSB0']
+
         # Cache for sensor data
         self.sensor_data = {}
         
@@ -106,7 +102,9 @@ class DbusLogger:
                 dbusTree=self.monitor_list,
                 valueChangedCallback=self._on_value_changed,
                 deviceAddedCallback=self._on_device_added,
-                deviceRemovedCallback=self._on_device_removed
+                deviceRemovedCallback=self._on_device_removed,
+                namespace="com.victronenergy", 
+                ignoreServices=self.ignored_services
             )
             
             self.logger.info("DbusMonitor initialized successfully for services: " + ', '.join(self.monitor_list.keys()))
@@ -135,6 +133,7 @@ class DbusLogger:
     def _initialize_sensor_cache(self):
         """Initialize sensor data cache with current values from DbusMonitor"""
         if not self.dbusMonitor:
+            self.logger.error("DbusMonitor is not initialized, cannot initialize sensor cache")
             return
             
         with self.data_lock:
@@ -156,6 +155,8 @@ class DbusLogger:
                         'value': value,
                         'timestamp': current_time
                     }
+
+                    self.logger.debug(f"Initialized sensor {sensor_key} with value: {value} at {datetime.fromtimestamp(current_time).isoformat()}")
             
             self.data_changed = True
             self.logger.debug(f"Initialized sensor cache with {len(self.sensor_data)} sensors: {list(self.sensor_data.keys())}")
@@ -389,6 +390,10 @@ if __name__ == "__main__":
     
     logging.basicConfig(level=log_level, format="%(asctime)-15s %(name)-8s %(levelname)s: %(message)s")
 
+    # Have a mainloop, so we can send/receive asynchronous calls to and from dbus
+    DBusGMainLoop(set_as_default=True)
+    mainloop = GLib.MainLoop()
+    
     dbusLogger = DbusLogger(
         buffer_size=args.buffer_size,
         min_log_interval=args.min_log_interval,
@@ -396,10 +401,7 @@ if __name__ == "__main__":
         log_level=log_level
     )
     
-    # Have a mainloop, so we can send/receive asynchronous calls to and from dbus
-    DBusGMainLoop(set_as_default=True)
-    mainloop = GLib.MainLoop()
-
+    
     # Initialize D-Bus and start logging
     dbusLogger.start_logging()
 

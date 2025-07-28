@@ -1,0 +1,18 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Run CSV Analyzer",
+			"type": "shell",
+			"command": "C:/CODE/repos/johan-jernstrom/VenusOS-DbusLogger/LogsAnalyzer/.venv/Scripts/python.exe",
+			"args": [
+				"csv_analyzer.py"
+			],
+			"group": "build",
+			"isBackground": false,
+			"problemMatcher": [
+				"$python"
+			]
+		}
+	]
+}
