@@ -51,6 +51,28 @@ class CSVAnalyzer:
         self.log_folder = log_folder
         self.data = pd.DataFrame()
         
+    def _validate_data_bounds(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Validate and clean data within acceptable bounds."""
+        # Create boolean masks for valid data
+        valid_voltage = (df['voltage'] >= VOLTAGE_MIN) & (df['voltage'] <= VOLTAGE_MAX)
+        valid_current = (df['current'] >= CURRENT_MIN) & (df['current'] <= CURRENT_MAX)
+        valid_gps = (df['gps_lat'] != 0.0) & (df['gps_lon'] != 0.0) & \
+                   (~pd.isna(df['gps_lat'])) & (~pd.isna(df['gps_lon']))
+        
+        # Log invalid data counts
+        invalid_voltage_count = (~valid_voltage).sum()
+        invalid_current_count = (~valid_current).sum()
+        invalid_gps_count = (~valid_gps).sum()
+        
+        if invalid_voltage_count > 0:
+            self.logger.warning(f"Found {invalid_voltage_count} rows with invalid voltage readings")
+        if invalid_current_count > 0:
+            self.logger.warning(f"Found {invalid_current_count} rows with invalid current readings")
+        if invalid_gps_count > 0:
+            self.logger.warning(f"Found {invalid_gps_count} rows with invalid GPS coordinates")
+            
+        return df, valid_voltage, valid_current, valid_gps
+
     def load_csv_files(self) -> None:
         """Load and combine all CSV files from the specified folder."""
         csv_files = glob.glob(os.path.join(self.log_folder, "*.csv"))
@@ -63,7 +85,17 @@ class CSVAnalyzer:
         dataframes = []
         for file in csv_files:
             try:
-                df = pd.read_csv(file)
+                # Use efficient data types to reduce memory usage
+                dtype_dict = {
+                    'soc': 'float32',
+                    'voltage': 'float32', 
+                    'current': 'float32',
+                    'gps_lat': 'float64',  # Keep high precision for GPS
+                    'gps_lon': 'float64',
+                    'gps_speed': 'float32'
+                }
+                
+                df = pd.read_csv(file, dtype=dtype_dict)
                 # Ensure required columns exist
                 required_columns = ['timestamp', 'soc', 'voltage', 'current', 
                                   'gps_lat', 'gps_lon', 'gps_speed']
@@ -84,7 +116,7 @@ class CSVAnalyzer:
         
         self.data = pd.concat(dataframes, ignore_index=True)
         self.logger.info(f"Total rows loaded: {len(self.data)}")
-        
+
     def preprocess_data(self) -> None:
         """Clean and preprocess the loaded data."""
         self.logger.info("Preprocessing data...")
@@ -99,195 +131,237 @@ class CSVAnalyzer:
         # Sort by timestamp
         self.data = self.data.sort_values('timestamp').reset_index(drop=True)
 
-        # Initialize calculated columns
-        self.data['distance_nm'] = 0.0
-        self.data['cumulative_distance_nm'] = 0.0
-        self.data['speed_knots'] = np.nan
+        # Initialize calculated columns with appropriate data types
+        self.data['distance_nm'] = pd.Series(0.0, dtype='float32')
+        self.data['cumulative_distance_nm'] = pd.Series(0.0, dtype='float32')
+        self.data['speed_knots'] = pd.Series(np.nan, dtype='float32')
+
+        # Validate data bounds
+        self.data, self.valid_voltage, self.valid_current, self.valid_gps = self._validate_data_bounds(self.data)
 
         self.logger.info(f"Final preprocessed data: {len(self.data)} rows")
 
     def calculate_distances(self) -> None:
-        """Calculate distances between consecutive GPS points in nautical miles."""
+        """Calculate distances between consecutive GPS points in nautical miles using vectorized operations."""
         self.logger.info("Calculating distances...")
-
-        cumulative_distance_nm = 0
-        prev_lat, prev_lon = None, None
         
-        for i in range(len(self.data)):
-            # skip if GPS coordinates are missing or 0.0
-            if pd.isna(self.data.iloc[i]['gps_lat']) or pd.isna(self.data.iloc[i]['gps_lon']) or \
-               self.data.iloc[i]['gps_lat'] == 0.0 or self.data.iloc[i]['gps_lon'] == 0.0:
-                self.data.at[i, 'distance_nm'] = 0
-                self.data.at[i, 'cumulative_distance_nm'] = cumulative_distance_nm
-                continue
-
-            # skip if previous point is None
-            if prev_lat is None or prev_lon is None:
-                prev_lat = self.data.iloc[i]['gps_lat']
-                prev_lon = self.data.iloc[i]['gps_lon']
-                self.data.at[i, 'distance_nm'] = 0
-                self.data.at[i, 'cumulative_distance_nm'] = cumulative_distance_nm
-                continue
-
-            # Get consecutive GPS coordinates
-            lat1, lon1 = prev_lat, prev_lon
-            lat2, lon2 = self.data.iloc[i]['gps_lat'], self.data.iloc[i]['gps_lon']
+        # Create boolean mask for valid GPS data
+        valid_coords = self.valid_gps
+        
+        if valid_coords.sum() < 2:
+            self.logger.warning("Insufficient valid GPS coordinates for distance calculation")
+            return
             
-            # Calculate distance using geodesic (great circle) distance in kilometers
-            distance_nm = geodesic((lat1, lon1), (lat2, lon2)).nm
-            prev_lat, prev_lon = lat2, lon2
-
-            # skip if distance is zero
-            if distance_nm == 0:
-                self.data.at[i, 'distance_nm'] = 0
-                self.data.at[i, 'cumulative_distance_nm'] = cumulative_distance_nm
+        # Get arrays of valid coordinates
+        valid_data = self.data[valid_coords].copy()
+        
+        # Calculate distances using vectorized operations where possible
+        lat1 = valid_data['gps_lat'].shift(1)
+        lon1 = valid_data['gps_lon'].shift(1)
+        lat2 = valid_data['gps_lat']
+        lon2 = valid_data['gps_lon']
+        
+        # Remove first row (no previous point)
+        mask = ~pd.isna(lat1)
+        
+        distances = []
+        cumulative_distance = 0.0
+        
+        # Use tqdm for progress tracking on large datasets
+        if len(valid_data) > 10000:
+            try:
+                from tqdm import tqdm
+                iterator = tqdm(range(len(valid_data)), desc="Calculating distances")
+            except ImportError:
+                iterator = range(len(valid_data))
+        else:
+            iterator = range(len(valid_data))
+            
+        for i in iterator:
+            if i == 0 or pd.isna(lat1.iloc[i]):
+                distances.append(0.0)
                 continue
-
-            #skip if distance is negative
-            if distance_nm < 0:
-                self.logger.warning(f"Skipping row {i} due to negative distance: {distance_nm:.2f} nm")
-                self.data.at[i, 'distance_nm'] = 0
-                self.data.at[i, 'cumulative_distance_nm'] = cumulative_distance_nm
-                continue
-
-            # Skip if unusually large distance (increased threshold to 0.1 nm ≈ 185 meters)
-            if distance_nm > 0.1:
-                self.logger.warning(f"Skipping row {i} due to unrealistic distance: {distance_nm:.2f} nm")
-                self.data.at[i, 'distance_nm'] = 0
-                self.data.at[i, 'cumulative_distance_nm'] = cumulative_distance_nm
-                continue
-
-            cumulative_distance_nm += distance_nm
-
-            # Store instant distance and cumulative distance
-            self.data.at[i, 'distance_nm'] = distance_nm
-            self.data.at[i, 'cumulative_distance_nm'] = cumulative_distance_nm
-
-        self.total_distance_nm = self.data['cumulative_distance_nm'].max()
-        self.logger.info(f"Distance calculation complete: {self.total_distance_nm:.2f} nautical miles")
+                
+            distance_nm = geodesic(
+                (lat1.iloc[i], lon1.iloc[i]), 
+                (lat2.iloc[i], lon2.iloc[i])
+            ).nm
+            
+            # Apply distance validation
+            if distance_nm < 0 or distance_nm > 0.1:
+                distance_nm = 0.0
+                
+            distances.append(distance_nm)
+            cumulative_distance += distance_nm
+            
+        # Map distances back to original dataframe with explicit float32 casting
+        valid_data['distance_nm'] = pd.Series(distances, dtype='float32')
+        valid_data['cumulative_distance_nm'] = pd.Series(np.cumsum(distances), dtype='float32')
+        
+        # Update main dataframe with explicit casting
+        self.data.loc[valid_coords, 'distance_nm'] = valid_data['distance_nm'].astype('float32')
+        self.data.loc[valid_coords, 'cumulative_distance_nm'] = valid_data['cumulative_distance_nm'].astype('float32')
+        
+        # Forward fill cumulative distances for invalid GPS points using modern syntax
+        self.data['cumulative_distance_nm'] = self.data['cumulative_distance_nm'].ffill().fillna(0.0)
+        
+        total_distance_nm = self.data['cumulative_distance_nm'].max()
+        self.logger.info(f"Distance calculation complete: {total_distance_nm:.2f} nautical miles")
 
     def calculate_speed_in_knots(self) -> None:
-        """Calculate speeds based on GPS data."""
+        """Calculate speeds based on GPS data using vectorized operations."""
         self.logger.info("Calculating speeds...")
 
-        for i in range(len(self.data)):
-            # skip if gps speed is missing or less than or equal to 0.0
-            if pd.isna(self.data.iloc[i]['gps_speed']) or self.data.iloc[i]['gps_speed'] <= 0.0:
-                self.data.at[i, 'speed_knots'] = np.nan
-                continue
-            # Calculate speed in knots
-            speed_knots = self.data.iloc[i]['gps_speed'] * 1.94384
+        # Vectorized speed calculation
+        speed_mask = (self.data['gps_speed'] > 0.0) & (~pd.isna(self.data['gps_speed']))
+        self.data.loc[speed_mask, 'speed_knots'] = self.data.loc[speed_mask, 'gps_speed'] * 1.94384
+        
+        # Filter out unrealistic speeds
+        speed_too_high = self.data['speed_knots'] > SPEED_MAX
+        if speed_too_high.sum() > 0:
+            self.logger.warning(f"Found {speed_too_high.sum()} rows with unrealistic speeds, setting to NaN")
+            self.data.loc[speed_too_high, 'speed_knots'] = np.nan
 
-            # skip if speed is greater than maximum speed
-            if speed_knots > SPEED_MAX:
-                self.logger.warning(f"Skipping row {i} due to unrealistic speed: {speed_knots:.2f} knots")
-                self.data.at[i, 'speed_knots'] = np.nan
-                continue
-            self.data.at[i, 'speed_knots'] = speed_knots
+    def _calculate_engine_power_vectorized(self) -> None:
+        """Calculate engine power using vectorized operations."""
+        # Engine is on when current is negative
+        engine_on_mask = (self.data['current'] < 0) & self.valid_voltage & self.valid_current
+        
+        # Calculate power for engine-on periods
+        self.data.loc[engine_on_mask, 'engine_watts'] = np.abs(
+            self.data.loc[engine_on_mask, 'voltage'] * self.data.loc[engine_on_mask, 'current']
+        )
+        self.data.loc[engine_on_mask, 'engine_current'] = -self.data.loc[engine_on_mask, 'current']
+        
+        # Filter out excessive power readings
+        power_too_high = self.data['engine_watts'] > ENGINE_POWER_MAX
+        if power_too_high.sum() > 0:
+            self.logger.warning(f"Found {power_too_high.sum()} rows with excessive power, setting to 0")
+            self.data.loc[power_too_high, ['engine_watts', 'engine_current']] = 0.0
+            
+        # Determine idling status
+        idling_mask = engine_on_mask & (self.data['current'] >= ENGINE_IDLE_CURRENT)
+        self.data.loc[idling_mask, 'engine_idling'] = 1
 
     def calculate_engine_metrics(self) -> None:
         """Calculate engine metrics based on current consumption."""
         self.logger.info("Calculating engine metrics...")
 
-        # Initialize columns to avoid KeyError
-        self.data['engine_watts'] = 0.0
-        self.data['engine_current'] = 0.0
-        self.data['engine_idling'] = 0
-        self.data['engine_seconds'] = 0.0
-        self.data['engine_hours'] = 0.0
-        self.data['engine_idling_seconds'] = 0.0
-        self.data['engine_idling_hours'] = 0.0
-        self.data['engine_efficiency'] = np.nan
+        # Initialize columns with appropriate data types
+        self.data['engine_watts'] = pd.Series(0.0, dtype='float32')
+        self.data['engine_current'] = pd.Series(0.0, dtype='float32')
+        self.data['engine_idling'] = pd.Series(0, dtype='int8')
+        self.data['engine_seconds'] = pd.Series(0.0, dtype='float32')
+        self.data['engine_hours'] = pd.Series(0.0, dtype='float32')
+        self.data['engine_idling_seconds'] = pd.Series(0.0, dtype='float32')
+        self.data['engine_idling_hours'] = pd.Series(0.0, dtype='float32')
+        self.data['engine_efficiency'] = pd.Series(np.nan, dtype='float32')
+
+        # Calculate power using vectorized operations
+        self._calculate_engine_power_vectorized()
         
+        # Calculate efficiency for non-idling periods with valid speed
+        # Engine must be running (watts > 0), not idling, and have valid speed
+        efficiency_mask = (self.data['engine_watts'] > 0) & \
+                         (self.data['engine_idling'] != 1.0) & \
+                         (~pd.isna(self.data['speed_knots'])) & \
+                         (self.data['speed_knots'] > 0)
+        
+        # Log how many efficiency calculations we're making
+        efficiency_count = efficiency_mask.sum()
+        self.logger.info(f"Calculating efficiency for {efficiency_count} data points")
+        
+        if efficiency_count > 0:
+            self.data.loc[efficiency_mask, 'engine_efficiency'] = (
+                self.data.loc[efficiency_mask, 'engine_watts'] / 
+                self.data.loc[efficiency_mask, 'speed_knots']
+            )
+            
+            # Log efficiency statistics
+            eff_values = self.data.loc[efficiency_mask, 'engine_efficiency']
+            self.logger.info(f"Engine efficiency - Mean: {eff_values.mean():.1f} W/knot, "
+                           f"Min: {eff_values.min():.1f} W/knot, Max: {eff_values.max():.1f} W/knot")
+        else:
+            self.logger.warning("No valid data points found for engine efficiency calculation")
+        
+        # Calculate cumulative times (this still needs iteration due to time dependencies)
+        self._calculate_cumulative_times()
+
+    def _calculate_cumulative_times(self) -> None:
+        """Calculate cumulative engine and idling times."""
         total_engine_seconds = 0.0
         total_idling_seconds = 0.0
         prev_timestamp = None
         prev_engine_on = False
         prev_idling = False
         
-        for i in range(len(self.data)):
-            current = self.data.iloc[i]['current']
-            voltage = self.data.iloc[i]['voltage']
-            timestamp = self.data.iloc[i]['timestamp']
-
-            # Skip if voltage or current is NaN or out of bounds
-            if pd.isna(current) or pd.isna(voltage) or \
-               current < CURRENT_MIN or current > CURRENT_MAX or \
-               voltage < VOLTAGE_MIN or voltage > VOLTAGE_MAX:
-                # Still update cumulative times for this row
-                self.data.at[i, 'engine_seconds'] = total_engine_seconds
-                self.data.at[i, 'engine_hours'] = total_engine_seconds / 3600.0
-                self.data.at[i, 'engine_idling_seconds'] = total_idling_seconds
-                self.data.at[i, 'engine_idling_hours'] = total_idling_seconds / 3600.0
-                prev_timestamp = timestamp
-                prev_engine_on = False
-                prev_idling = False
-                continue
-
-            # Determine if engine is currently running
-            engine_on = current < 0
+        # Use batch processing for better performance
+        batch_size = 10000
+        for start_idx in range(0, len(self.data), batch_size):
+            end_idx = min(start_idx + batch_size, len(self.data))
+            batch = self.data.iloc[start_idx:end_idx]
             
-            # Set current row values if engine is on
-            if engine_on:
-                # Calculate power (Watts) = Voltage (Volts) * Current (Amps)
-                power = abs(voltage * current)
-
-                # Skip if power exceeds maximum engine power
-                if power > ENGINE_POWER_MAX:
-                    self.logger.warning(f"Skipping row {i} due to excessive power: {power:.2f}W")
-                    # Still update cumulative times
-                    self.data.at[i, 'engine_seconds'] = total_engine_seconds
-                    self.data.at[i, 'engine_hours'] = total_engine_seconds / 3600.0
-                    self.data.at[i, 'engine_idling_seconds'] = total_idling_seconds
-                    self.data.at[i, 'engine_idling_hours'] = total_idling_seconds / 3600.0
+            for i in range(len(batch)):
+                actual_idx = start_idx + i
+                current = batch.iloc[i]['current']
+                timestamp = batch.iloc[i]['timestamp']
+                
+                # Skip invalid data
+                if not (self.valid_voltage.iloc[actual_idx] and self.valid_current.iloc[actual_idx]):
+                    self.data.at[actual_idx, 'engine_seconds'] = total_engine_seconds
+                    self.data.at[actual_idx, 'engine_hours'] = total_engine_seconds / 3600.0
+                    self.data.at[actual_idx, 'engine_idling_seconds'] = total_idling_seconds
+                    self.data.at[actual_idx, 'engine_idling_hours'] = total_idling_seconds / 3600.0
+                    prev_timestamp = timestamp
+                    prev_engine_on = False
+                    prev_idling = False
                     continue
 
-                self.data.at[i, 'engine_watts'] = power
-                self.data.at[i, 'engine_current'] = -current
+                engine_on = current < 0
+                is_idling = engine_on and current >= ENGINE_IDLE_CURRENT
                 
-                # Determine if idling (current closer to 0 means idling)
-                is_idling = current >= ENGINE_IDLE_CURRENT
-                self.data.at[i, 'engine_idling'] = 1 if is_idling else 0
-                
-                # Calculate engine efficiency (watts per knot) if above idle current and speed available
-                if not is_idling and not pd.isna(self.data.iloc[i]['speed_knots']) and self.data.iloc[i]['speed_knots'] > 0:
-                    efficiency = power / self.data.iloc[i]['speed_knots']
-                    self.data.at[i, 'engine_efficiency'] = efficiency
-
-                # Calculate time difference and accumulate if previous readings show engine on
-                if prev_timestamp is not None and prev_engine_on:
+                # Calculate time differences
+                if prev_timestamp is not None and prev_engine_on and engine_on:
                     time_diff = (timestamp - prev_timestamp).total_seconds()
                     
-                    # Only add time if within reasonable gap (avoid inflating hours from data gaps)
                     if 0 < time_diff <= MAX_TIME_GAP.total_seconds():
                         total_engine_seconds += time_diff
                         
-                        # Add to idling time if both previous and current readings were idling
                         if prev_idling and is_idling:
                             total_idling_seconds += time_diff
-                    elif time_diff > MAX_TIME_GAP.total_seconds():
-                        self.logger.warning(f"Large time gap detected: {time_diff:.0f} seconds, not adding to engine hours")
 
-                # Update for next iteration
+                # Store cumulative times
+                self.data.at[actual_idx, 'engine_seconds'] = total_engine_seconds
+                self.data.at[actual_idx, 'engine_hours'] = total_engine_seconds / 3600.0
+                self.data.at[actual_idx, 'engine_idling_seconds'] = total_idling_seconds
+                self.data.at[actual_idx, 'engine_idling_hours'] = total_idling_seconds / 3600.0
+
+                prev_timestamp = timestamp
+                prev_engine_on = engine_on
                 prev_idling = is_idling
-            else:
-                # Engine is off
-                prev_idling = False
-
-            # Store cumulative times for this row
-            self.data.at[i, 'engine_seconds'] = total_engine_seconds
-            self.data.at[i, 'engine_hours'] = total_engine_seconds / 3600.0
-            self.data.at[i, 'engine_idling_seconds'] = total_idling_seconds
-            self.data.at[i, 'engine_idling_hours'] = total_idling_seconds / 3600.0
-
-            # Update for next iteration
-            prev_timestamp = timestamp
-            prev_engine_on = engine_on
 
         max_engine_hours = self.data['engine_hours'].max()
         max_idling_hours = self.data['engine_idling_hours'].max()
         self.logger.info(f"Engine metrics calculated: {max_engine_hours:.1f} hours total, "
                         f"of which {max_idling_hours:.1f} hours were idling")
+
+    def get_summary_stats(self) -> Dict[str, float]:
+        """Return summary statistics for the analysis."""
+        engine_data = self.data[self.data['engine_watts'] > 0]
+        efficiency_data = self.data[~pd.isna(self.data['engine_efficiency'])]
+        
+        return {
+            'total_distance_nm': float(self.data['cumulative_distance_nm'].max() or 0),
+            'total_engine_hours': float(self.data['engine_hours'].max() or 0),
+            'total_idling_hours': float(self.data['engine_idling_hours'].max() or 0),
+            'avg_engine_efficiency': float(efficiency_data['engine_efficiency'].mean() or 0),
+            'max_speed_knots': float(self.data['speed_knots'].max() or 0),
+            'avg_engine_power': float(engine_data['engine_watts'].mean() or 0),
+            'max_engine_power': float(engine_data['engine_watts'].max() or 0),
+            'data_points': len(self.data),
+            'valid_gps_points': int(self.valid_gps.sum()),
+            'efficiency_data_points': len(efficiency_data)
+        }
 
     def save_output(self) -> None:
         """Save processed data to a CSV file in the log folder."""
@@ -333,13 +407,17 @@ def main():
         # analyzer.plot_efficiency()
         # analyzer.generate_summary_report()
         analyzer.save_output()
+
+        summary_stats = analyzer.get_summary_stats()
+        print("\nSummary Statistics:")
+        for key, value in summary_stats.items():
+            print(f"{key}: {value:.2f}" if isinstance(value, float) else f"{key}: {value}")
         
         print("\nAnalysis completed successfully!")
         
     except Exception as e:
         print(f"Error during analysis: {e}")
         return
-
 
 if __name__ == "__main__":
     main()
