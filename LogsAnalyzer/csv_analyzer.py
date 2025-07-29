@@ -94,9 +94,13 @@ class CSVAnalyzer:
         self.data = self.data.dropna(subset=['gps_lat', 'gps_lon', 'gps_speed'])
         self.data = self.data[(self.data['gps_lat'] != 0) | (self.data['gps_lon'] != 0)]
         
+        print(f"Removed {initial_rows - len(self.data)} rows with invalid GPS data")
+
         # Remove rows with invalid electrical data
+        initial_rows = len(self.data)
         self.data = self.data.dropna(subset=['voltage', 'current'])
-        
+        print(f"Removed {initial_rows - len(self.data)} rows with invalid electrical data")
+
         # Convert GPS speed from m/s to knots (1 m/s = 1.94384 knots)
         self.data['speed_knots'] = self.data['gps_speed'] * 1.94384
         
@@ -109,11 +113,23 @@ class CSVAnalyzer:
         
         # 2. Filter out positive currents (battery charging - happens when docked/stationary)
         # Keep only negative currents (engine consumption) and convert to positive values
+        # Also filter out zero or near-zero currents (no actual consumption)
+        
         charging_rows = len(self.data[self.data['current'] >= 0])
         if charging_rows > 0:
             print(f"Removed {charging_rows} rows with positive current (battery charging)")
         
-        self.data = self.data[self.data['current'] < 0].copy()
+        # Filter for actual engine consumption: current must be significantly negative
+        # This excludes zero current, NaN values, and very low house loads
+        engine_threshold = -0.3  # Minimum 0.3A consumption to be considered engine operation
+        self.data = self.data[self.data['current'] <= engine_threshold].copy()
+        
+        zero_current_rows = charging_rows  # Approximate count of non-engine rows
+        print(f"Applied engine threshold: keeping only current <= {engine_threshold}A")
+        
+        if len(self.data) == 0:
+            print("Warning: No engine operation data found after filtering")
+            return
         
         # Convert negative current to positive consumption values
         self.data['current_consumption'] = abs(self.data['current'])
@@ -143,7 +159,7 @@ class CSVAnalyzer:
             lat2, lon2 = self.data.iloc[i]['gps_lat'], self.data.iloc[i]['gps_lon']
             
             # Calculate distance using geodesic (great circle) distance in kilometers
-            distance_km = geodesic((lat1, lon1), (lat2, lon2)).kilometers
+            distance_km = geodesic((lat1, lon1), (lat2, lon2)).nm
             
             # Convert kilometers to nautical miles (1 km = 0.539957 nautical miles)
             distance_nm = distance_km * 0.539957
@@ -333,18 +349,27 @@ class CSVAnalyzer:
                     avg_idle_power = idle_data['power_watts'].mean()
                     print(f"  Average idle power: {avg_idle_power:.0f}W ({avg_idle_power/24:.1f}A at 24V)")
                 
-                # Calculate total engine hours (more accurate calculation)
+                # Calculate total engine hours (more accurate calculation with gap detection)
                 if len(self.efficiency_data) > 1:
                     # Sort by timestamp to ensure correct order
                     sorted_data = self.efficiency_data.sort_values('timestamp')
                     
                     # Calculate time differences between consecutive readings
                     time_diffs = []
+                    large_gaps = 0
+                    max_gap_minutes = 5  # Consider gaps > 5 minutes as data interruptions
+                    
                     for i in range(1, len(sorted_data)):
                         time_diff = (sorted_data.iloc[i]['timestamp'] - sorted_data.iloc[i-1]['timestamp']).total_seconds()
-                        time_diffs.append(time_diff)
+                        
+                        # Only count time differences that are reasonable (< 5 minutes)
+                        # This prevents counting long periods where logging was stopped
+                        if time_diff <= max_gap_minutes * 60:  # 5 minutes in seconds
+                            time_diffs.append(time_diff)
+                        else:
+                            large_gaps += 1
                     
-                    # Sum all time differences to get total engine time
+                    # Sum all reasonable time differences to get total engine time
                     total_seconds = sum(time_diffs)
                     total_hours = total_seconds / 3600
                     
@@ -353,12 +378,15 @@ class CSVAnalyzer:
                     print(f"\nEngine Usage:")
                     print(f"  Total engine time: {total_hours:.1f} hours ({total_seconds:.0f} seconds)")
                     print(f"  Distance under engine: {engine_distance:.1f} nautical miles")
+                    print(f"  Large data gaps detected: {large_gaps} (>{max_gap_minutes} min)")
                     if total_hours > 0 and engine_distance > 0:
                         avg_engine_speed = engine_distance / total_hours
                         print(f"  Average engine speed: {avg_engine_speed:.1f} knots")
                     
                     # Additional useful metrics
-                    print(f"  Data sampling rate: ~{total_seconds/len(self.efficiency_data):.1f} seconds per reading")
+                    if len(time_diffs) > 0:
+                        avg_sampling_interval = sum(time_diffs) / len(time_diffs)
+                        print(f"  Average sampling interval: ~{avg_sampling_interval:.1f} seconds per reading")
                     if total_hours > 0:
                         avg_power_consumption = self.efficiency_data['power_watts'].mean()
                         total_energy_kwh = (avg_power_consumption * total_hours) / 1000
@@ -435,18 +463,27 @@ class CSVAnalyzer:
                         avg_idle_power = idle_data['power_watts'].mean()
                         f.write(f"  Average idle power: {avg_idle_power:.0f}W ({avg_idle_power/24:.1f}A at 24V)\n")
                     
-                    # Calculate total engine hours (more accurate calculation)
+                    # Calculate total engine hours (more accurate calculation with gap detection)
                     if len(self.efficiency_data) > 1:
                         # Sort by timestamp to ensure correct order
                         sorted_data = self.efficiency_data.sort_values('timestamp')
                         
                         # Calculate time differences between consecutive readings
                         time_diffs = []
+                        large_gaps = 0
+                        max_gap_minutes = 5  # Consider gaps > 5 minutes as data interruptions
+                        
                         for i in range(1, len(sorted_data)):
                             time_diff = (sorted_data.iloc[i]['timestamp'] - sorted_data.iloc[i-1]['timestamp']).total_seconds()
-                            time_diffs.append(time_diff)
+                            
+                            # Only count time differences that are reasonable (< 5 minutes)
+                            # This prevents counting long periods where logging was stopped
+                            if time_diff <= max_gap_minutes * 60:  # 5 minutes in seconds
+                                time_diffs.append(time_diff)
+                            else:
+                                large_gaps += 1
                         
-                        # Sum all time differences to get total engine time
+                        # Sum all reasonable time differences to get total engine time
                         total_seconds = sum(time_diffs)
                         total_hours = total_seconds / 3600
                         
@@ -455,12 +492,15 @@ class CSVAnalyzer:
                         f.write(f"\nEngine Usage:\n")
                         f.write(f"  Total engine time: {total_hours:.1f} hours ({total_seconds:.0f} seconds)\n")
                         f.write(f"  Distance under engine: {engine_distance:.1f} nautical miles\n")
+                        f.write(f"  Large data gaps detected: {large_gaps} (>{max_gap_minutes} min)\n")
                         if total_hours > 0 and engine_distance > 0:
                             avg_engine_speed = engine_distance / total_hours
                             f.write(f"  Average engine speed: {avg_engine_speed:.1f} knots\n")
                         
                         # Additional useful metrics
-                        f.write(f"  Data sampling rate: ~{total_seconds/len(self.efficiency_data):.1f} seconds per reading\n")
+                        if len(time_diffs) > 0:
+                            avg_sampling_interval = sum(time_diffs) / len(time_diffs)
+                            f.write(f"  Average sampling interval: ~{avg_sampling_interval:.1f} seconds per reading\n")
                         if total_hours > 0:
                             avg_power_consumption = self.efficiency_data['power_watts'].mean()
                             total_energy_kwh = (avg_power_consumption * total_hours) / 1000
