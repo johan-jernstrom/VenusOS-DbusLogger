@@ -473,11 +473,27 @@ class CSVAnalyzer:
 
 def main():
     """Main function to run the CSV analysis."""
-    # Get folder path from user or use current directory
-    folder_path = input("Enter the path to the folder containing CSV files (or press Enter for current directory): ").strip()
+    # Default to logs folder in current directory
+    default_folder = "logs"
+    folder_path = default_folder
     
-    if not folder_path:
-        folder_path = "."
+    # Check if logs folder exists and contains CSV files
+    if not os.path.exists(default_folder):
+        print(f"Default folder '{default_folder}' does not exist.")
+        folder_path = input("Enter the path to the folder containing CSV files (or press Enter for current directory): ").strip()
+        if not folder_path:
+            folder_path = "."
+    else:
+        # Check if logs folder contains any CSV files
+        import glob
+        csv_files = glob.glob(os.path.join(default_folder, "*.csv"))
+        if not csv_files:
+            print(f"Default folder '{default_folder}' contains no CSV files.")
+            folder_path = input("Enter the path to the folder containing CSV files (or press Enter for current directory): ").strip()
+            if not folder_path:
+                folder_path = "."
+        else:
+            print(f"Using default folder: {default_folder}")
     
     if not os.path.exists(folder_path):
         print(f"Error: Folder '{folder_path}' does not exist")
