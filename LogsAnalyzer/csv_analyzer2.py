@@ -108,18 +108,23 @@ class CSVAnalyzer:
         self.logger.info("Calculating distances...")
 
         distance_nm = 0
+        cumulative_distance_nm = 0
         prev_lat, prev_lon = None, None
         
         for i in range(len(self.data)):
             # skip if GPS coordinates are missing or 0.0
             if pd.isna(self.data.iloc[i]['gps_lat']) or pd.isna(self.data.iloc[i]['gps_lon']) or \
                self.data.iloc[i]['gps_lat'] == 0.0 or self.data.iloc[i]['gps_lon'] == 0.0:
+                self.data.at[i, 'distance_nm'] = 0
+                self.data.at[i, 'cumulative_distance_nm'] = cumulative_distance_nm
                 continue
 
             # skip if previous point is None
             if prev_lat is None or prev_lon is None:
                 prev_lat = self.data.iloc[i]['gps_lat']
                 prev_lon = self.data.iloc[i]['gps_lon']
+                self.data.at[i, 'distance_nm'] = 0
+                self.data.at[i, 'cumulative_distance_nm'] = cumulative_distance_nm
                 continue
 
             # Get consecutive GPS coordinates
@@ -132,22 +137,30 @@ class CSVAnalyzer:
 
             # skip if distance is zero
             if distance_nm == 0:
+                self.data.at[i, 'distance_nm'] = 0
+                self.data.at[i, 'cumulative_distance_nm'] = cumulative_distance_nm
                 continue
 
             #skip if distance is negative
             if distance_nm < 0:
                 self.logger.warning(f"Skipping row {i} due to negative distance: {distance_nm:.2f} nm")
+                self.data.at[i, 'distance_nm'] = 0
+                self.data.at[i, 'cumulative_distance_nm'] = cumulative_distance_nm
                 continue
-                
-            # Warn if unusually large distance
+
+            # Skip if unusually large distance
             if distance_nm > 0.01:  # 0.01 nm is about 18.5 meters
                 self.logger.warning(f"Skipping row {i} due to unrealistic distance: {distance_nm:.2f} nm")
+                self.data.at[i, 'distance_nm'] = 0
+                self.data.at[i, 'cumulative_distance_nm'] = cumulative_distance_nm
                 continue
+
+            cumulative_distance_nm += distance_nm
 
             # Store instant distance and cumulative distance
             self.data.at[i, 'distance_nm'] = distance_nm
-            self.data.at[i, 'cumulative_distance_nm'] = self.data['distance_nm'].cumsum().iloc[i]
-            
+            self.data.at[i, 'cumulative_distance_nm'] = cumulative_distance_nm
+
         self.total_distance_nm = self.data['cumulative_distance_nm'].max()
         self.logger.info(f"Distance calculation complete: {self.total_distance_nm:.2f} nautical miles")
 
