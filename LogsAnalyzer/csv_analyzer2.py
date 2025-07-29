@@ -2,9 +2,7 @@
 """
 Sailboat Engine Efficiency Analyzer for VenusOS DbusLogger
 Parses CSV files containing GPS and electrical data to calculate:
-- Total dista        print("Engine data breakdown:")
-        print(f"  Moving periods (>=0.5 knots): {len(moving_data)} data points")
-        print(f"  Idle periods (<0.5 knots): {len(idle_data)} data points") traveled (in nautical miles)
+- Total distance traveled (in nautical miles)
 - Engine efficiency (watts per knot)
 - Generates efficiency plots with sailboat-specific filtering
 
@@ -101,13 +99,17 @@ class CSVAnalyzer:
         # Sort by timestamp
         self.data = self.data.sort_values('timestamp').reset_index(drop=True)
 
+        # Initialize calculated columns
+        self.data['distance_nm'] = 0.0
+        self.data['cumulative_distance_nm'] = 0.0
+        self.data['speed_knots'] = np.nan
+
         self.logger.info(f"Final preprocessed data: {len(self.data)} rows")
 
     def calculate_distances(self) -> None:
         """Calculate distances between consecutive GPS points in nautical miles."""
         self.logger.info("Calculating distances...")
 
-        distance_nm = 0
         cumulative_distance_nm = 0
         prev_lat, prev_lon = None, None
         
@@ -148,8 +150,8 @@ class CSVAnalyzer:
                 self.data.at[i, 'cumulative_distance_nm'] = cumulative_distance_nm
                 continue
 
-            # Skip if unusually large distance
-            if distance_nm > 0.01:  # 0.01 nm is about 18.5 meters
+            # Skip if unusually large distance (increased threshold to 0.1 nm ≈ 185 meters)
+            if distance_nm > 0.1:
                 self.logger.warning(f"Skipping row {i} due to unrealistic distance: {distance_nm:.2f} nm")
                 self.data.at[i, 'distance_nm'] = 0
                 self.data.at[i, 'cumulative_distance_nm'] = cumulative_distance_nm
@@ -171,6 +173,7 @@ class CSVAnalyzer:
         for i in range(len(self.data)):
             # skip if gps speed is missing or less than or equal to 0.0
             if pd.isna(self.data.iloc[i]['gps_speed']) or self.data.iloc[i]['gps_speed'] <= 0.0:
+                self.data.at[i, 'speed_knots'] = np.nan
                 continue
             # Calculate speed in knots
             speed_knots = self.data.iloc[i]['gps_speed'] * 1.94384
@@ -178,6 +181,7 @@ class CSVAnalyzer:
             # skip if speed is greater than maximum speed
             if speed_knots > SPEED_MAX:
                 self.logger.warning(f"Skipping row {i} due to unrealistic speed: {speed_knots:.2f} knots")
+                self.data.at[i, 'speed_knots'] = np.nan
                 continue
             self.data.at[i, 'speed_knots'] = speed_knots
 
@@ -193,6 +197,7 @@ class CSVAnalyzer:
         self.data['engine_hours'] = 0.0
         self.data['engine_idling_seconds'] = 0.0
         self.data['engine_idling_hours'] = 0.0
+        self.data['engine_efficiency'] = np.nan
         
         total_engine_seconds = 0.0
         total_idling_seconds = 0.0
@@ -245,11 +250,10 @@ class CSVAnalyzer:
                 self.data.at[i, 'engine_idling'] = 1 if is_idling else 0
                 
                 # Calculate engine efficiency (watts per knot) if above idle current and speed available
-                if not is_idling and 'speed_knots' in self.data.columns and \
-                   not pd.isna(self.data.iloc[i]['speed_knots']) and self.data.iloc[i]['speed_knots'] > 0:
+                if not is_idling and not pd.isna(self.data.iloc[i]['speed_knots']) and self.data.iloc[i]['speed_knots'] > 0:
                     efficiency = power / self.data.iloc[i]['speed_knots']
                     self.data.at[i, 'engine_efficiency'] = efficiency
-                
+
                 # Calculate time difference and accumulate if previous readings show engine on
                 if prev_timestamp is not None and prev_engine_on:
                     time_diff = (timestamp - prev_timestamp).total_seconds()
