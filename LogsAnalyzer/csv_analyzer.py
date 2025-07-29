@@ -2,7 +2,9 @@
 """
 Sailboat Engine Efficiency Analyzer for VenusOS DbusLogger
 Parses CSV files containing GPS and electrical data to calculate:
-- Total distance traveled (in nautical miles)
+- Total dista        print("Engine data breakdown:")
+        print(f"  Moving periods (>=0.5 knots): {len(moving_data)} data points")
+        print(f"  Idle periods (<0.5 knots): {len(idle_data)} data points") traveled (in nautical miles)
 - Engine efficiency (watts per knot)
 - Generates efficiency plots with sailboat-specific filtering
 
@@ -80,8 +82,12 @@ class CSVAnalyzer:
         """Clean and preprocess the loaded data."""
         print("Preprocessing data...")
         
-        # Convert timestamp to datetime
-        self.data['timestamp'] = pd.to_datetime(self.data['timestamp'])
+        # Convert timestamp to datetime with flexible parsing
+        try:
+            self.data['timestamp'] = pd.to_datetime(self.data['timestamp'])
+        except Exception as e:
+            print(f"Warning: Timestamp parsing issue, using mixed format: {e}")
+            self.data['timestamp'] = pd.to_datetime(self.data['timestamp'], format='mixed')
         
         # Remove rows with invalid GPS coordinates (0,0 or NaN)
         initial_rows = len(self.data)
@@ -155,29 +161,43 @@ class CSVAnalyzer:
         """Calculate engine efficiency (watts per knot)."""
         print("Calculating engine efficiency...")
         
-        # Filter out stationary points (speed < 0.5 knots)
-        # Note: Data is already filtered for sailboat conditions in preprocessing
-        moving_data = self.data[self.data['speed_knots'] >= 0.5].copy()
+        # All negative current data represents engine operation (including idle)
+        # The data is already filtered to only include negative currents (engine consumption)
+        engine_data = self.data.copy()
+        
+        # Separate moving and stationary (idle) engine periods
+        moving_data = engine_data[engine_data['speed_knots'] >= 0.5].copy()
+        idle_data = engine_data[engine_data['speed_knots'] < 0.5].copy()
+        
+        print(f"Engine data breakdown:")
+        print(f"  Moving periods (≥0.5 knots): {len(moving_data)} data points")
+        print(f"  Idle periods (<0.5 knots): {len(idle_data)} data points")
+        print(f"  Total engine operation: {len(engine_data)} data points")
         
         if len(moving_data) == 0:
             print("Warning: No movement data found (all speeds < 0.5 knots)")
+            # Still use all engine data for time calculations, but no efficiency metrics
+            self.efficiency_data = engine_data
             return
         
-        # Calculate efficiency (watts per knot) using consumption power
+        # Calculate efficiency (watts per knot) only for moving periods
         moving_data['efficiency_watts_per_knot'] = moving_data['power_watts'] / moving_data['speed_knots']
         
         # Remove any remaining extreme outliers (efficiency > 2000 watts/knot)
-        # This is more lenient since we've already filtered the raw data
         moving_data = moving_data[moving_data['efficiency_watts_per_knot'] <= 2000]
         
-        self.efficiency_data = moving_data
+        # For time calculations, use ALL engine data (moving + idle)
+        # For efficiency calculations, use only moving data
+        self.efficiency_data = engine_data  # All engine operation for time calculations
+        self.moving_efficiency_data = moving_data  # Only moving periods for efficiency metrics
         
-        if len(self.efficiency_data) > 0:
-            avg_efficiency = self.efficiency_data['efficiency_watts_per_knot'].mean()
-            print(f"Average engine efficiency: {avg_efficiency:.2f} watts per knot")
-            print(f"Efficiency data points: {len(self.efficiency_data)}")
+        if len(moving_data) > 0:
+            avg_efficiency = moving_data['efficiency_watts_per_knot'].mean()
+            print(f"Average engine efficiency (moving only): {avg_efficiency:.2f} watts per knot")
+            print(f"Moving efficiency data points: {len(moving_data)}")
         else:
-            print("Warning: No valid efficiency data calculated")
+            print("Warning: No valid moving efficiency data calculated")
+            self.moving_efficiency_data = pd.DataFrame()  # Empty dataframe if no moving data
             
     def plot_efficiency(self) -> None:
         """Create plots for engine efficiency analysis."""
@@ -185,15 +205,21 @@ class CSVAnalyzer:
             print("No efficiency data to plot")
             return
             
+        # Use moving data for efficiency plots if available
+        plot_data = getattr(self, 'moving_efficiency_data', self.efficiency_data)
+        if len(plot_data) == 0:
+            print("No moving efficiency data to plot")
+            return
+            
         print("Generating efficiency plots...")
         
         # Create subplots
         fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 12))
-        fig.suptitle('Sailboat Engine Efficiency Analysis', fontsize=16)
+        fig.suptitle('Sailboat Engine Efficiency Analysis (Moving Periods)', fontsize=16)
         
         # Plot 1: Efficiency over time
-        ax1.plot(self.efficiency_data['timestamp'], 
-                self.efficiency_data['efficiency_watts_per_knot'], 
+        ax1.plot(plot_data['timestamp'], 
+                plot_data['efficiency_watts_per_knot'], 
                 alpha=0.7, linewidth=0.8, color='blue')
         ax1.set_title('Engine Efficiency Over Time')
         ax1.set_xlabel('Time')
@@ -202,8 +228,8 @@ class CSVAnalyzer:
         ax1.tick_params(axis='x', rotation=45)
         
         # Plot 2: Efficiency vs Speed
-        ax2.scatter(self.efficiency_data['speed_knots'], 
-                   self.efficiency_data['efficiency_watts_per_knot'], 
+        ax2.scatter(plot_data['speed_knots'], 
+                   plot_data['efficiency_watts_per_knot'], 
                    alpha=0.6, s=2, color='red')
         ax2.set_title('Engine Efficiency vs Speed')
         ax2.set_xlabel('Speed (knots)')
@@ -211,21 +237,21 @@ class CSVAnalyzer:
         ax2.set_xlim(0, 8)  # Sailboat speed limit
         ax2.grid(True, alpha=0.3)
         
-        # Plot 3: Power Consumption vs Speed
+        # Plot 3: Power Consumption vs Speed (use ALL engine data including idle)
         ax3.scatter(self.efficiency_data['speed_knots'], 
                    self.efficiency_data['power_watts'], 
                    alpha=0.6, s=2, color='green')
-        ax3.set_title('Power Consumption vs Speed')
+        ax3.set_title('Power Consumption vs Speed (All Engine Operation)')
         ax3.set_xlabel('Speed (knots)')
         ax3.set_ylabel('Power Consumption (watts)')
-        ax3.set_xlim(0, 8)  # Sailboat speed limit
+        ax3.set_xlim(-0.5, 8)  # Include idle at 0 knots
         ax3.set_ylim(0, 11000)  # Engine power limit
         ax3.grid(True, alpha=0.3)
         
-        # Plot 4: Efficiency histogram
-        ax4.hist(self.efficiency_data['efficiency_watts_per_knot'], 
+        # Plot 4: Efficiency histogram (moving periods only)
+        ax4.hist(plot_data['efficiency_watts_per_knot'], 
                 bins=50, alpha=0.7, edgecolor='black', color='orange')
-        ax4.set_title('Engine Efficiency Distribution')
+        ax4.set_title('Engine Efficiency Distribution (Moving Only)')
         ax4.set_xlabel('Watts per Knot')
         ax4.set_ylabel('Frequency')
         ax4.grid(True, alpha=0.3)
@@ -251,44 +277,61 @@ class CSVAnalyzer:
             print(f"Total distance traveled: {self.total_distance_nm:.2f} nautical miles")
             
             if len(self.efficiency_data) > 0:
-                avg_speed = self.efficiency_data['speed_knots'].mean()
-                max_speed = self.efficiency_data['speed_knots'].max()
-                avg_power = self.efficiency_data['power_watts'].mean()
-                max_power = self.efficiency_data['power_watts'].max()
-                avg_efficiency = self.efficiency_data['efficiency_watts_per_knot'].mean()
+                # Overall engine statistics (including idle)
+                avg_power_all = self.efficiency_data['power_watts'].mean()
+                max_power_all = self.efficiency_data['power_watts'].max()
                 
-                print(f"\nSpeed Statistics (Engine Only):")
-                print(f"  Average speed under engine: {avg_speed:.2f} knots")
-                print(f"  Maximum speed under engine: {max_speed:.2f} knots")
+                print(f"\nEngine Power Statistics (All Operation):")
+                print(f"  Average power consumption: {avg_power_all:.0f} watts ({avg_power_all/1000:.1f} kW)")
+                print(f"  Maximum power consumption: {max_power_all:.0f} watts ({max_power_all/1000:.1f} kW)")
                 
-                print(f"\nPower Consumption Statistics:")
-                print(f"  Average power consumption: {avg_power:.0f} watts ({avg_power/1000:.1f} kW)")
-                print(f"  Maximum power consumption: {max_power:.0f} watts ({max_power/1000:.1f} kW)")
-                
-                print(f"\nEngine Efficiency:")
-                print(f"  Average efficiency: {avg_efficiency:.1f} watts per knot")
-                
-                # Calculate efficiency at different speed ranges (sailboat specific)
-                speed_ranges = [
-                    (0, 2, "Very slow motoring (0-2 knots)"),
-                    (2, 4, "Slow motoring (2-4 knots)"),
-                    (4, 6, "Medium motoring (4-6 knots)"),
-                    (6, 8, "Fast motoring (6-8 knots)")
-                ]
-                
-                print(f"\nEfficiency by Speed Range:")
-                for min_speed, max_speed, label in speed_ranges:
-                    mask = (self.efficiency_data['speed_knots'] >= min_speed) & \
-                           (self.efficiency_data['speed_knots'] < max_speed)
-                    range_data = self.efficiency_data[mask]
+                # Moving periods statistics
+                if hasattr(self, 'moving_efficiency_data') and len(self.moving_efficiency_data) > 0:
+                    avg_speed = self.moving_efficiency_data['speed_knots'].mean()
+                    max_speed = self.moving_efficiency_data['speed_knots'].max()
+                    avg_efficiency = self.moving_efficiency_data['efficiency_watts_per_knot'].mean()
                     
-                    if len(range_data) > 0:
-                        range_efficiency = range_data['efficiency_watts_per_knot'].mean()
-                        range_power = range_data['power_watts'].mean()
-                        print(f"  {label}:")
-                        print(f"    Efficiency: {range_efficiency:.1f} watts/knot")
-                        print(f"    Avg Power: {range_power:.0f}W ({range_power/1000:.1f}kW)")
-                        print(f"    Data points: {len(range_data)}")
+                    print(f"\nSpeed Statistics (Moving Periods Only):")
+                    print(f"  Average speed under engine: {avg_speed:.2f} knots")
+                    print(f"  Maximum speed under engine: {max_speed:.2f} knots")
+                    
+                    print(f"\nEngine Efficiency (Moving Periods Only):")
+                    print(f"  Average efficiency: {avg_efficiency:.1f} watts per knot")
+                    
+                    # Calculate efficiency at different speed ranges (sailboat specific)
+                    speed_ranges = [
+                        (0, 2, "Very slow motoring (0-2 knots)"),
+                        (2, 4, "Slow motoring (2-4 knots)"),
+                        (4, 6, "Medium motoring (4-6 knots)"),
+                        (6, 8, "Fast motoring (6-8 knots)")
+                    ]
+                    
+                    print(f"\nEfficiency by Speed Range (Moving Only):")
+                    for min_speed, max_speed, label in speed_ranges:
+                        mask = (self.moving_efficiency_data['speed_knots'] >= min_speed) & \
+                               (self.moving_efficiency_data['speed_knots'] < max_speed)
+                        range_data = self.moving_efficiency_data[mask]
+                        
+                        if len(range_data) > 0:
+                            range_efficiency = range_data['efficiency_watts_per_knot'].mean()
+                            range_power = range_data['power_watts'].mean()
+                            print(f"  {label}:")
+                            print(f"    Efficiency: {range_efficiency:.1f} watts/knot")
+                            print(f"    Avg Power: {range_power:.0f}W ({range_power/1000:.1f}kW)")
+                            print(f"    Data points: {len(range_data)}")
+                
+                # Idle vs moving breakdown
+                idle_data = self.efficiency_data[self.efficiency_data['speed_knots'] < 0.5]
+                moving_data = self.efficiency_data[self.efficiency_data['speed_knots'] >= 0.5]
+                
+                print(f"\nEngine Operation Breakdown:")
+                print(f"  Total engine data points: {len(self.efficiency_data)}")
+                print(f"  Idle periods (<0.5 knots): {len(idle_data)} points")
+                print(f"  Moving periods (>=0.5 knots): {len(moving_data)} points")
+                
+                if len(idle_data) > 0:
+                    avg_idle_power = idle_data['power_watts'].mean()
+                    print(f"  Average idle power: {avg_idle_power:.0f}W ({avg_idle_power/24:.1f}A at 24V)")
                 
                 # Calculate total engine hours (more accurate calculation)
                 if len(self.efficiency_data) > 1:
@@ -336,44 +379,61 @@ class CSVAnalyzer:
                 f.write(f"Total distance traveled: {self.total_distance_nm:.2f} nautical miles\n")
                 
                 if len(self.efficiency_data) > 0:
-                    avg_speed = self.efficiency_data['speed_knots'].mean()
-                    max_speed = self.efficiency_data['speed_knots'].max()
-                    avg_power = self.efficiency_data['power_watts'].mean()
-                    max_power = self.efficiency_data['power_watts'].max()
-                    avg_efficiency = self.efficiency_data['efficiency_watts_per_knot'].mean()
+                    # Overall engine statistics (including idle)
+                    avg_power_all = self.efficiency_data['power_watts'].mean()
+                    max_power_all = self.efficiency_data['power_watts'].max()
                     
-                    f.write(f"\nSpeed Statistics (Engine Only):\n")
-                    f.write(f"  Average speed under engine: {avg_speed:.2f} knots\n")
-                    f.write(f"  Maximum speed under engine: {max_speed:.2f} knots\n")
+                    f.write(f"\nEngine Power Statistics (All Operation):\n")
+                    f.write(f"  Average power consumption: {avg_power_all:.0f} watts ({avg_power_all/1000:.1f} kW)\n")
+                    f.write(f"  Maximum power consumption: {max_power_all:.0f} watts ({max_power_all/1000:.1f} kW)\n")
                     
-                    f.write(f"\nPower Consumption Statistics:\n")
-                    f.write(f"  Average power consumption: {avg_power:.0f} watts ({avg_power/1000:.1f} kW)\n")
-                    f.write(f"  Maximum power consumption: {max_power:.0f} watts ({max_power/1000:.1f} kW)\n")
-                    
-                    f.write(f"\nEngine Efficiency:\n")
-                    f.write(f"  Average efficiency: {avg_efficiency:.1f} watts per knot\n")
-                    
-                    # Calculate efficiency at different speed ranges (sailboat specific)
-                    speed_ranges = [
-                        (0, 2, "Very slow motoring (0-2 knots)"),
-                        (2, 4, "Slow motoring (2-4 knots)"),
-                        (4, 6, "Medium motoring (4-6 knots)"),
-                        (6, 8, "Fast motoring (6-8 knots)")
-                    ]
-                    
-                    f.write(f"\nEfficiency by Speed Range:\n")
-                    for min_speed, max_speed, label in speed_ranges:
-                        mask = (self.efficiency_data['speed_knots'] >= min_speed) & \
-                               (self.efficiency_data['speed_knots'] < max_speed)
-                        range_data = self.efficiency_data[mask]
+                    # Moving periods statistics
+                    if hasattr(self, 'moving_efficiency_data') and len(self.moving_efficiency_data) > 0:
+                        avg_speed = self.moving_efficiency_data['speed_knots'].mean()
+                        max_speed = self.moving_efficiency_data['speed_knots'].max()
+                        avg_efficiency = self.moving_efficiency_data['efficiency_watts_per_knot'].mean()
                         
-                        if len(range_data) > 0:
-                            range_efficiency = range_data['efficiency_watts_per_knot'].mean()
-                            range_power = range_data['power_watts'].mean()
-                            f.write(f"  {label}:\n")
-                            f.write(f"    Efficiency: {range_efficiency:.1f} watts/knot\n")
-                            f.write(f"    Avg Power: {range_power:.0f}W ({range_power/1000:.1f}kW)\n")
-                            f.write(f"    Data points: {len(range_data)}\n")
+                        f.write(f"\nSpeed Statistics (Moving Periods Only):\n")
+                        f.write(f"  Average speed under engine: {avg_speed:.2f} knots\n")
+                        f.write(f"  Maximum speed under engine: {max_speed:.2f} knots\n")
+                        
+                        f.write(f"\nEngine Efficiency (Moving Periods Only):\n")
+                        f.write(f"  Average efficiency: {avg_efficiency:.1f} watts per knot\n")
+                        
+                        # Calculate efficiency at different speed ranges (sailboat specific)
+                        speed_ranges = [
+                            (0, 2, "Very slow motoring (0-2 knots)"),
+                            (2, 4, "Slow motoring (2-4 knots)"),
+                            (4, 6, "Medium motoring (4-6 knots)"),
+                            (6, 8, "Fast motoring (6-8 knots)")
+                        ]
+                        
+                        f.write(f"\nEfficiency by Speed Range (Moving Only):\n")
+                        for min_speed, max_speed, label in speed_ranges:
+                            mask = (self.moving_efficiency_data['speed_knots'] >= min_speed) & \
+                                   (self.moving_efficiency_data['speed_knots'] < max_speed)
+                            range_data = self.moving_efficiency_data[mask]
+                            
+                            if len(range_data) > 0:
+                                range_efficiency = range_data['efficiency_watts_per_knot'].mean()
+                                range_power = range_data['power_watts'].mean()
+                                f.write(f"  {label}:\n")
+                                f.write(f"    Efficiency: {range_efficiency:.1f} watts/knot\n")
+                                f.write(f"    Avg Power: {range_power:.0f}W ({range_power/1000:.1f}kW)\n")
+                                f.write(f"    Data points: {len(range_data)}\n")
+                    
+                    # Idle vs moving breakdown
+                    idle_data = self.efficiency_data[self.efficiency_data['speed_knots'] < 0.5]
+                    moving_data = self.efficiency_data[self.efficiency_data['speed_knots'] >= 0.5]
+                    
+                    f.write(f"\nEngine Operation Breakdown:\n")
+                    f.write(f"  Total engine data points: {len(self.efficiency_data)}\n")
+                    f.write(f"  Idle periods (<0.5 knots): {len(idle_data)} points\n")
+                    f.write(f"  Moving periods (>=0.5 knots): {len(moving_data)} points\n")
+                    
+                    if len(idle_data) > 0:
+                        avg_idle_power = idle_data['power_watts'].mean()
+                        f.write(f"  Average idle power: {avg_idle_power:.0f}W ({avg_idle_power/24:.1f}A at 24V)\n")
                     
                     # Calculate total engine hours (more accurate calculation)
                     if len(self.efficiency_data) > 1:

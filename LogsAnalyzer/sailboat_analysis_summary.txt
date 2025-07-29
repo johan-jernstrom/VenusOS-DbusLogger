@@ -1,41 +1,36 @@
 SAILBOAT ENGINE EFFICIENCY ANALYSIS SUMMARY
 ============================================================
-Generated on: 2025-07-28 22:14:30
+Generated on: 2025-07-28 22:23:52
 
-Total valid data points: 5
-Time period: 2025-07-21 09:06:05.865571 to 2025-07-21 09:06:10.873585
-Total distance traveled: 0.01 nautical miles
+Total valid data points: 15
+Time period: 2024-01-01 10:00:00 to 2025-07-21 09:06:10.873585
+Total distance traveled: 394.73 nautical miles
 
-Speed Statistics (Engine Only):
-  Average speed under engine: 5.40 knots
-  Maximum speed under engine: 7.97 knots
-
-Power Consumption Statistics:
-  Average power consumption: 570 watts (0.6 kW)
+Engine Power Statistics (All Operation):
+  Average power consumption: 203 watts (0.2 kW)
   Maximum power consumption: 834 watts (0.8 kW)
 
-Engine Efficiency:
-  Average efficiency: 107.9 watts per knot
+Speed Statistics (Moving Periods Only):
+  Average speed under engine: 5.14 knots
+  Maximum speed under engine: 7.97 knots
 
-Efficiency by Speed Range:
+Engine Efficiency (Moving Periods Only):
+  Average efficiency: 64.2 watts per knot
+
+Efficiency by Speed Range (Moving Only):
   Slow motoring (2-4 knots):
-    Efficiency: 128.6 watts/knot
-    Avg Power: 375W (0.4kW)
-    Data points: 1
+    Efficiency: 71.0 watts/knot
+    Avg Power: 203W (0.2kW)
+    Data points: 2
   Medium motoring (4-6 knots):
-    Efficiency: 102.2 watts/knot
-    Avg Power: 483W (0.5kW)
-    Data points: 2
+    Efficiency: 71.4 watts/knot
+    Avg Power: 335W (0.3kW)
+    Data points: 3
   Fast motoring (6-8 knots):
-    Efficiency: 103.3 watts/knot
-    Avg Power: 754W (0.8kW)
-    Data points: 2
+    Efficiency: 55.4 watts/knot
+    Avg Power: 401W (0.4kW)
+    Data points: 4
 
-Engine Usage:
-  Total engine time: 0.0 hours (5 seconds)
-  Distance under engine: 0.0 nautical miles
-  Average engine speed: 3.7 knots
-  Data sampling rate: ~1.0 seconds per reading
-  Estimated energy consumption: 0.00 kWh
-
-============================================================
+Engine Operation Breakdown:
+  Total engine data points: 15
+  Idle periods (<0.5 knots): 6 points
