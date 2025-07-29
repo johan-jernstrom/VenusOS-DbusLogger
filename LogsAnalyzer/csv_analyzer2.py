@@ -110,7 +110,7 @@ class CSVAnalyzer:
         distance_nm = 0
         prev_lat, prev_lon = None, None
         
-        for i in range(1, len(self.data)):
+        for i in range(len(self.data)):
             # skip if GPS coordinates are missing or 0.0
             if pd.isna(self.data.iloc[i]['gps_lat']) or pd.isna(self.data.iloc[i]['gps_lon']) or \
                self.data.iloc[i]['gps_lat'] == 0.0 or self.data.iloc[i]['gps_lon'] == 0.0:
@@ -155,7 +155,7 @@ class CSVAnalyzer:
         """Calculate speeds based on GPS data."""
         self.logger.info("Calculating speeds...")
 
-        for i in range(1, len(self.data)):
+        for i in range(len(self.data)):
             # skip if gps speed is missing or less than or equal to 0.0
             if pd.isna(self.data.iloc[i]['gps_speed']) or self.data.iloc[i]['gps_speed'] <= 0.0:
                 continue
@@ -310,7 +310,7 @@ def main():
         # Run analysis
         analyzer.load_csv_files()
         analyzer.preprocess_data()
-        # analyzer.calculate_distances()
+        analyzer.calculate_distances()
         analyzer.calculate_speed_in_knots()
         analyzer.calculate_engine_metrics()
         # analyzer.plot_efficiency()
