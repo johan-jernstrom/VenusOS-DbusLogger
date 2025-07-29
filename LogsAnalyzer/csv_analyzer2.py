@@ -38,6 +38,7 @@ VOLTAGE_MIN = 45  # Minimum voltage for valid readings
 VOLTAGE_MAX = 70  # Maximum voltage for valid readings
 CURRENT_MIN = -300  # Minimum current for valid readings
 CURRENT_MAX = 300  # Maximum current for valid readings
+BATTERY_CAPACITY = 300.0  # Battery capacity in Ampere-hours (Ah), adjust as needed
 
 class CSVAnalyzer:
     def __init__(self, log_folder: str):
@@ -363,14 +364,123 @@ class CSVAnalyzer:
             'efficiency_data_points': len(efficiency_data)
         }
 
-    def save_output(self) -> None:
-        """Save processed data to a CSV file in the log folder."""
-        # save processed data to a CSV in a subfolder to the log folder
+    def export_processed_data(self) -> None:
+        """Export processed data to a CSV file in the log folder."""
         if not os.path.exists(os.path.join(self.log_folder, "processed_data")):
             os.makedirs(os.path.join(self.log_folder, "processed_data"))
         output_path = os.path.join(self.log_folder, "processed_data", "processed_data.csv")
         self.data.to_csv(output_path, index=False)
         self.logger.info(f"Processed data saved to {output_path}")
+
+    def plot_efficiency(self) -> None:
+        """Plot engine efficiency with focus on engine efficency measured as watts per knot as a function of speed in knots.
+        Make a graph showing mean efficiency per speed bin, with error bars for standard deviation.
+        Also show total range in nautical miles for each speed bin using a constant speed.
+        1 knot = 1 nautical mile per hour.
+        """
+        self.logger.info("Plotting engine efficiency...")
+        
+        # Filter out invalid data
+        valid_efficiency = self.data[~pd.isna(self.data['engine_efficiency']) & 
+                                     (self.data['engine_efficiency'] > 0) & 
+                                     (self.data['speed_knots'] > 0) &
+                                     (self.data['engine_watts'] > 0)]
+        
+        if valid_efficiency.empty:
+            self.logger.warning("No valid efficiency data to plot")
+            return
+        
+        # Create bins for speed
+        speed_bins = np.arange(0, SPEED_MAX + 1, 1.0)
+        bin_labels = [f"{i}-{i+1}" for i in speed_bins[:-1]]
+        
+        # Calculate mean and std deviation of efficiency per speed bin
+        binned_data = pd.cut(valid_efficiency['speed_knots'], bins=speed_bins, labels=bin_labels)
+        efficiency_summary = valid_efficiency.groupby(binned_data).agg({
+            'engine_efficiency': ['mean', 'std', 'count'],
+            'engine_watts': 'mean',
+            'voltage': 'mean'
+        }).reset_index()
+        
+        # Flatten column names
+        efficiency_summary.columns = ['speed_bin', 'efficiency_mean', 'efficiency_std', 'count', 'power_mean', 'voltage_mean']
+        
+        # Calculate theoretical range for each speed bin
+        # Range = (Battery Capacity [Ah] * Average Voltage [V]) / Average Power [W]
+        # This gives hours of operation, multiply by speed to get nautical miles
+        speed_centers = np.arange(0.5, SPEED_MAX, 1.0)  # Center of each bin
+        efficiency_summary['theoretical_range_nm'] = (
+            (BATTERY_CAPACITY * efficiency_summary['voltage_mean']) / 
+            efficiency_summary['power_mean']
+        ) * speed_centers[:len(efficiency_summary)]
+        
+        # Remove rows with insufficient data
+        efficiency_summary = efficiency_summary[efficiency_summary['count'] >= 3]
+        
+        if efficiency_summary.empty:
+            self.logger.warning("Insufficient data points per speed bin for plotting")
+            return
+        
+        # Create figure with two y-axes
+        fig, ax1 = plt.subplots(figsize=(14, 8))
+        
+        # Plot efficiency on primary y-axis
+        color = 'tab:blue'
+        ax1.set_xlabel('Speed Bin (knots)')
+        ax1.set_ylabel('Efficiency (W/knot)', color=color)
+        ax1.errorbar(range(len(efficiency_summary)), efficiency_summary['efficiency_mean'], 
+                     yerr=efficiency_summary['efficiency_std'], fmt='o-', capsize=5, 
+                     color=color, label='Mean Efficiency ± Std Dev')
+        ax1.tick_params(axis='y', labelcolor=color)
+        ax1.grid(True, alpha=0.3)
+        
+        # Create secondary y-axis for theoretical range
+        ax2 = ax1.twinx()
+        color = 'tab:red'
+        ax2.set_ylabel('Theoretical Range (nautical miles)', color=color)
+        ax2.bar(range(len(efficiency_summary)), efficiency_summary['theoretical_range_nm'], 
+                alpha=0.6, color=color, label='Theoretical Range')
+        ax2.tick_params(axis='y', labelcolor=color)
+        
+        # Set x-axis labels
+        ax1.set_xticks(range(len(efficiency_summary)))
+        ax1.set_xticklabels(efficiency_summary['speed_bin'], rotation=45)
+        
+        # Add title and legends
+        plt.title('Engine Efficiency and Theoretical Range vs Speed\n' + 
+                 f'Battery Capacity: {BATTERY_CAPACITY} Ah', fontsize=14)
+        
+        # Combine legends
+        lines1, labels1 = ax1.get_legend_handles_labels()
+        lines2, labels2 = ax2.get_legend_handles_labels()
+        ax1.legend(lines1 + lines2, labels1 + labels2, loc='upper right')
+        
+        # Add data point counts as text annotations
+        for i, (idx, row) in enumerate(efficiency_summary.iterrows()):
+            ax1.annotate(f'n={int(row["count"])}', 
+                        (i, row['efficiency_mean']), 
+                        textcoords="offset points", 
+                        xytext=(0,10), ha='center', fontsize=8)
+        
+        plt.tight_layout()
+        
+        # Save plot
+        if not os.path.exists(os.path.join(self.log_folder, "processed_data")):
+            os.makedirs(os.path.join(self.log_folder, "processed_data"))
+        output_path = os.path.join(self.log_folder, "processed_data", "engine_efficiency_plot.png")
+        plt.savefig(output_path, dpi=300, bbox_inches='tight')
+        self.logger.info(f"Efficiency plot saved to {output_path}")
+        
+        # Log summary statistics
+        self.logger.info("Efficiency and Range Summary by Speed Bin:")
+        for _, row in efficiency_summary.iterrows():
+            self.logger.info(f"  {row['speed_bin']} knots: "
+                           f"Efficiency {row['efficiency_mean']:.1f}±{row['efficiency_std']:.1f} W/knot, "
+                           f"Range {row['theoretical_range_nm']:.1f} nm, "
+                           f"Data points: {int(row['count'])}")
+        
+        # Display the plot
+        plt.show()
 
 def main():
     
@@ -404,9 +514,9 @@ def main():
         analyzer.calculate_distances()
         analyzer.calculate_speed_in_knots()
         analyzer.calculate_engine_metrics()
-        # analyzer.plot_efficiency()
+        analyzer.export_processed_data()
+        analyzer.plot_efficiency()
         # analyzer.generate_summary_report()
-        analyzer.save_output()
 
         summary_stats = analyzer.get_summary_stats()
         print("\nSummary Statistics:")
