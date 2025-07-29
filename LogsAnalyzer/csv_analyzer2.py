@@ -172,56 +172,114 @@ class CSVAnalyzer:
         """Calculate engine metrics based on current consumption."""
         self.logger.info("Calculating engine metrics...")
 
-        prev_row = None
+        # Initialize columns to avoid KeyError
+        self.data['engine_watts'] = 0.0
+        self.data['engine_current'] = 0.0
+        self.data['engine_idling'] = 0
+        self.data['engine_seconds'] = 0.0
+        self.data['engine_hours'] = 0.0
+        self.data['engine_idling_seconds'] = 0.0
+        self.data['engine_idling_hours'] = 0.0
+        
+        total_engine_seconds = 0.0
+        total_idling_seconds = 0.0
+        prev_timestamp = None
+        prev_engine_on = False
+        prev_idling = False
         
         for i in range(len(self.data)):
             current = self.data.iloc[i]['current']
             voltage = self.data.iloc[i]['voltage']
+            timestamp = self.data.iloc[i]['timestamp']
 
             # Skip if voltage or current is NaN or out of bounds
             if pd.isna(current) or pd.isna(voltage) or \
                current < CURRENT_MIN or current > CURRENT_MAX or \
                voltage < VOLTAGE_MIN or voltage > VOLTAGE_MAX:
-                self.logger.warning(f"Skipping row {i} due to invalid current or voltage: {current:.2f}A, {voltage:.2f}V")
+                # Still update cumulative times for this row
+                self.data.at[i, 'engine_seconds'] = total_engine_seconds
+                self.data.at[i, 'engine_hours'] = total_engine_seconds / 3600.0
+                self.data.at[i, 'engine_idling_seconds'] = total_idling_seconds
+                self.data.at[i, 'engine_idling_hours'] = total_idling_seconds / 3600.0
+                prev_timestamp = timestamp
+                prev_engine_on = False
+                prev_idling = False
                 continue
 
-            # Skip if current is not negative (i.e., positive or zero), i.e., not engine consumption
-            if current >= 0:
-                continue
-
-            # Calculate power (Watts) = Voltage (Volts) * Current (Amps)
-            power = abs(voltage * current)
-
-            # Skip if power exceeds maximum engine power
-            if power > ENGINE_POWER_MAX:
-                self.logger.warning(f"Skipping row {i} due to excessive power: {power:.2f}W")
-                continue
-
-            self.data.at[i, 'engine_watts'] = power
-            self.data.at[i, 'engine_consumption'] = -current
-            self.data.at[i, 'engine_idling'] = 1 if current >= ENGINE_IDLE_CURRENT else 0
-
-            # Calculate engine efficiency (watts per knot) if above idle current and speed in knot is available and greater than 0
-            if current > ENGINE_IDLE_CURRENT and 'speed_knots' in self.data.columns and self.data.iloc[i]['speed_knots'] > 0:
-                efficiency = power / self.data.iloc[i]['speed_knots']
-                self.data.at[i, 'engine_efficiency'] = efficiency      
+            # Determine if engine is currently running
+            engine_on = current < 0
             
-            # Calculate total engine seconds if previous row exists and is consecutive
-            if self.IsConsecutive(prev_row, i):
-                time_diff = (self.data.iloc[i]['timestamp'] - prev_row['timestamp']).total_seconds()
-                self.data.at[i, 'engine_seconds'] = prev_row['engine_seconds'] + time_diff if 'engine_seconds' in prev_row else time_diff
-                self.data.at[i, 'engine_hours'] = self.data.at[i, 'engine_seconds'] / 3600.0
-                # Also add append idling seconds if engine is idling and engine was idling in previous row
-                if self.data.iloc[i]['engine_idling'] == 1:
-                    self.data.at[i, 'engine_idling_seconds'] = prev_row['engine_idling_seconds'] + time_diff if 'engine_idling_seconds' in prev_row else time_diff
-                    self.data.at[i, 'engine_idling_hours'] = self.data.at[i, 'engine_idling_seconds'] / 3600.0
+            # Set current row values if engine is on
+            if engine_on:
+                # Calculate power (Watts) = Voltage (Volts) * Current (Amps)
+                power = abs(voltage * current)
 
-            prev_row = self.data.iloc[i]
+                # Skip if power exceeds maximum engine power
+                if power > ENGINE_POWER_MAX:
+                    self.logger.warning(f"Skipping row {i} due to excessive power: {power:.2f}W")
+                    # Still update cumulative times
+                    self.data.at[i, 'engine_seconds'] = total_engine_seconds
+                    self.data.at[i, 'engine_hours'] = total_engine_seconds / 3600.0
+                    self.data.at[i, 'engine_idling_seconds'] = total_idling_seconds
+                    self.data.at[i, 'engine_idling_hours'] = total_idling_seconds / 3600.0
+                    continue
 
-        self.logger.info(f"Engine metrics calculated: {self.data['engine_hours'].max():.2f} hours, of which {self.data['engine_idling_hours'].max():.2f} hours were idling")
+                self.data.at[i, 'engine_watts'] = power
+                self.data.at[i, 'engine_current'] = -current
+                
+                # Determine if idling (current closer to 0 means idling)
+                is_idling = current >= ENGINE_IDLE_CURRENT
+                self.data.at[i, 'engine_idling'] = 1 if is_idling else 0
+                
+                # Calculate engine efficiency (watts per knot) if above idle current and speed available
+                if not is_idling and 'speed_knots' in self.data.columns and \
+                   not pd.isna(self.data.iloc[i]['speed_knots']) and self.data.iloc[i]['speed_knots'] > 0:
+                    efficiency = power / self.data.iloc[i]['speed_knots']
+                    self.data.at[i, 'engine_efficiency'] = efficiency
+                
+                # Calculate time difference and accumulate if previous readings show engine on
+                if prev_timestamp is not None and prev_engine_on:
+                    time_diff = (timestamp - prev_timestamp).total_seconds()
+                    
+                    # Only add time if within reasonable gap (avoid inflating hours from data gaps)
+                    if 0 < time_diff <= MAX_TIME_GAP.total_seconds():
+                        total_engine_seconds += time_diff
+                        
+                        # Add to idling time if both previous and current readings were idling
+                        if prev_idling and is_idling:
+                            total_idling_seconds += time_diff
+                    elif time_diff > MAX_TIME_GAP.total_seconds():
+                        self.logger.warning(f"Large time gap detected: {time_diff:.0f} seconds, not adding to engine hours")
 
-    def IsConsecutive(self, prev_row, i):
-        return prev_row is not None and (self.data.iloc[i]['timestamp'] - prev_row['timestamp']) <= MAX_TIME_GAP
+                # Update for next iteration
+                prev_idling = is_idling
+            else:
+                # Engine is off
+                prev_idling = False
+
+            # Store cumulative times for this row
+            self.data.at[i, 'engine_seconds'] = total_engine_seconds
+            self.data.at[i, 'engine_hours'] = total_engine_seconds / 3600.0
+            self.data.at[i, 'engine_idling_seconds'] = total_idling_seconds
+            self.data.at[i, 'engine_idling_hours'] = total_idling_seconds / 3600.0
+
+            # Update for next iteration
+            prev_timestamp = timestamp
+            prev_engine_on = engine_on
+
+        max_engine_hours = self.data['engine_hours'].max()
+        max_idling_hours = self.data['engine_idling_hours'].max()
+        self.logger.info(f"Engine metrics calculated: {max_engine_hours:.1f} hours total, "
+                        f"of which {max_idling_hours:.1f} hours were idling")
+
+    def save_output(self) -> None:
+        """Save processed data to a CSV file in the log folder."""
+        # save processed data to a CSV in a subfolder to the log folder
+        if not os.path.exists(os.path.join(self.log_folder, "processed_data")):
+            os.makedirs(os.path.join(self.log_folder, "processed_data"))
+        output_path = os.path.join(self.log_folder, "processed_data", "processed_data.csv")
+        self.data.to_csv(output_path, index=False)
+        self.logger.info(f"Processed data saved to {output_path}")
 
 def main():
     
@@ -252,16 +310,13 @@ def main():
         # Run analysis
         analyzer.load_csv_files()
         analyzer.preprocess_data()
-        analyzer.calculate_distances()
+        # analyzer.calculate_distances()
         analyzer.calculate_speed_in_knots()
         analyzer.calculate_engine_metrics()
         # analyzer.plot_efficiency()
         # analyzer.generate_summary_report()
-
-        # save preprocessed data to a CSV in the log folder
-        analyzer.data.to_csv(os.path.join(log_folder, "processed_data.csv"), index=False)
-        print("Processed data saved to processed_data.csv")
-
+        analyzer.save_output()
+        
         print("\nAnalysis completed successfully!")
         
     except Exception as e:
